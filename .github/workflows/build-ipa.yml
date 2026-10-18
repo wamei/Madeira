@@ -128,6 +128,7 @@ jobs:
         run: |
           echo "wine=$(git -C wine rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "fex=$(git -C FEX rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+          echo "dxmt=$(git -C dxmt rev-parse HEAD)" >> "$GITHUB_OUTPUT"
           echo "ffmpeg=$(shasum -a 256 build/ffmpeg/src/SHA256SUMS build/ffmpeg/build.sh | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
           echo "gnutls=$(shasum -a 256 build/gnutls-ios/src/SHA256SUMS build/gnutls-ios/build.sh | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
@@ -476,6 +477,31 @@ jobs:
       - name: Build Madeira Dock
         shell: bash
         run: bash build/madeira-dock/build.sh
+
+      # The 32-bit farm WoW64 sessions load (docs/WOW64.md). Not committed
+      # upstream, but the releases carry it; without it 32-bit games cannot
+      # start. Only the installed farm is cached.
+      - name: Restore 32-bit (i386) farm
+        id: i386
+        uses: actions/cache/restore@v4
+        with:
+          path: app/Madeira/i386-windows
+          key: i386-farm-v1-${{ steps.rev.outputs.wine }}-${{ steps.rev.outputs.dxmt }}-${{ hashFiles('build/wine-i386/build.sh') }}
+
+      - name: Build 32-bit (i386) farm
+        if: steps.i386.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          bash build/wine-i386/build.sh > wine-i386.log 2>&1 || { grep -E "error|Error" wine-i386.log | head -40; tail -30 wine-i386.log; exit 1; }
+          tail -5 wine-i386.log
+          echo "::notice::i386 farm: $(ls app/Madeira/i386-windows | wc -l | tr -d ' ') files"
+
+      - name: Save 32-bit (i386) farm
+        if: steps.i386.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/Madeira/i386-windows
+          key: i386-farm-v1-${{ steps.rev.outputs.wine }}-${{ steps.rev.outputs.dxmt }}-${{ hashFiles('build/wine-i386/build.sh') }}
 
       # tools/fetch-vcruntime.md: Microsoft's DLLs, unmodified. 7-Zip only sees
       # the Burn bundle's stub, so cabextract/msiextract peel the containers and

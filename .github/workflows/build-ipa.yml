@@ -390,6 +390,19 @@ jobs:
           key: llvm-ios-v1-${{ env.LLVM_TAG }}
 
       # ------------------------------------------------------------------ DXMT
+      # airconv's shader headers, which DXMT's meson build generates
+      # (dxmt/src/airconv/meson.build) and build/dxmt-ios/build.sh expects.
+      - name: Generate airconv shader headers
+        shell: bash
+        run: |
+          OUT=build/dxmt-ios/shader-headers
+          mkdir -p "$OUT"
+          for s in air_msad air_samplepos air_tessellation; do
+            xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+              -o "$OUT/$s.air" -c "dxmt/src/airconv/shaders/$s.metal"
+            (cd "$OUT" && xxd -n "$s" -i "$s.air" "$s.h")
+          done
+
       - name: Build DXMT unix side
         shell: bash
         run: |

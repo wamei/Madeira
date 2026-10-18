@@ -144,8 +144,11 @@ jobs:
           ../configure --without-x --without-freetype --disable-tests > "$GITHUB_WORKSPACE/wine-native-configure.log" 2>&1 \
             || { tail -40 "$GITHUB_WORKSPACE/wine-native-configure.log"; exit 1; }
           N=$(sysctl -n hw.ncpu)
-          make -j"$N" __tools__ > "$GITHUB_WORKSPACE/wine-native-make.log" 2>&1
-          make -j"$N" include >> "$GITHUB_WORKSPACE/wine-native-make.log" 2>&1
+          # Only the host tools and the generated headers are used from this tree.
+          make -j"$N" tools/widl/widl tools/wrc/wrc tools/wmc/wmc tools/winebuild/winebuild \
+            tools/winegcc/winegcc tools/sfnt2fon/sfnt2fon tools/make_xftmpl \
+            > "$GITHUB_WORKSPACE/wine-native-make.log" 2>&1 || { tail -40 "$GITHUB_WORKSPACE/wine-native-make.log"; exit 1; }
+          make -k -j"$N" include >> "$GITHUB_WORKSPACE/wine-native-make.log" 2>&1 || true
           test -x tools/widl/widl
 
       - name: Save native Wine tools

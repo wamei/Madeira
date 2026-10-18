@@ -359,6 +359,8 @@ enum SteamDirectStart {
     @Published private(set) var games: [DockGame] = []
     /// `buildid` of each install in Madeira's own library folder, by App ID.
     @Published private(set) var builds: [Int: Int] = [:]
+    /// The language each of those install records names (`UserConfig.language`).
+    @Published private(set) var languages: [Int: String] = [:]
     private var scanning = false
     /// A refresh was asked for while a scan ran (an install record was just
     /// written): scan again once it ends.
@@ -373,19 +375,22 @@ enum SteamDirectStart {
         let drive = MadeiraDock.drive
         Task.detached(priority: .utility) {
             let found = MadeiraDock.games(drive: drive)
-            var builds: [Int: Int] = [:]
+            var builds: [Int: Int] = [:], languages: [Int: String] = [:]
             for game in found where SteamInstallPaths.isManaged(library: game.library) && game.installed {
-                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: SteamInstallPaths.steamApps(drive: drive)) {
+                let steamApps = SteamInstallPaths.steamApps(drive: drive)
+                if let build = SteamInstallFiles.buildID(appID: game.id, steamApps: steamApps) {
                     builds[game.id] = build
                 }
+                languages[game.id] = SteamInstallFiles.language(appID: game.id, steamApps: steamApps)
             }
-            let recorded = builds
+            let recorded = builds, recordedLanguages = languages
             await MainActor.run {
                 self.scanning = false
                 let again = self.rescan
                 self.rescan = false
                 if self.games != found { self.games = found }
                 if self.builds != recorded { self.builds = recorded }
+                if self.languages != recordedLanguages { self.languages = recordedLanguages }
                 if found.count != self.lastCount {
                     self.lastCount = found.count
                     LogStore.shared.log("[steam-games] installed=\(found.count) ready=\(found.filter(\.installed).count)")
@@ -1229,6 +1234,16 @@ struct SteamEntrySection: View {
             } else if downloads, steam.updateAvailable(appID: appID, installedBuild: games.builds[appID]) {
                 Button { steam.install(appID) } label: { Label("Update available — download", systemImage: "arrow.down.circle") }
                     .disabled(!steam.signedIn)
+            }
+            if managed, let recorded = games.languages[appID] {
+                LabeledContent("Language", value: SteamLanguage.name(recorded))
+                if downloads, download == nil, let wanted = steam.game(appID)?.installLanguage, wanted != recorded {
+                    Button { steam.repair(appID) } label: {
+                        Label("Download in \(SteamLanguage.name(wanted))", systemImage: "character.bubble")
+                    }.disabled(!steam.signedIn)
+                    Text("Adds the game's \(SteamLanguage.name(wanted)) content and tells Steam to start it in that language. Files of the current language are kept.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
             }
             if downloads, download == nil {
                 Button { steam.repair(appID) } label: { Label("Repair installed files", systemImage: "arrow.triangle.2.circlepath") }

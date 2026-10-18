@@ -687,6 +687,7 @@ struct SteamSettingsSection: View {
     @ObservedObject private var signIn = SteamSignInModel.shared
     @ObservedObject private var dock = MadeiraDockModel.shared
     @ObservedObject private var onboarding = OnboardingModel.shared
+    @ObservedObject private var cloud = SteamCloudSetting.shared
     @State private var confirmSignOut = false
     /// Settings › Steam › Game language (SteamLanguage); "" follows the device.
     @State private var language = SteamLanguage.chosen ?? ""
@@ -701,6 +702,10 @@ struct SteamSettingsSection: View {
                 Button("Sign out of Steam", role: .destructive) { confirmSignOut = true }
             } else {
                 Button { open(.steamSignIn) } label: { Label("Sign in to Steam", systemImage: "person.crop.circle.badge.plus") }
+            }
+            // Off: no Steam Cloud checks, transfers or prompts before Play (docs/STEAM_CLOUD.md).
+            if SteamOwnedLibrary.enabled {
+                Toggle("Steam Cloud saves", isOn: $cloud.on)
             }
             Picker("Game language", selection: $language) {
                 Text("Device language (\(SteamLanguage.name(SteamLanguage.device)))").tag("")

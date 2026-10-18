@@ -36,7 +36,57 @@ env:
   LLVM_TAG: llvmorg-15.0.7
 
 jobs:
+  # DXMT's Metal shaders, embedded as C headers: airconv's helpers (which
+  # DXMT's meson build generates, dxmt/src/airconv/meson.build) and the
+  # command library (as build/dxmt-ios/build.sh makes it, which then keeps
+  # this newer copy). Xcode 27's Metal compiler rejects air_tessellation.metal
+  # (__metal_atomic_fetch_add_explicit takes another argument), so Xcode 26.
+  shaders:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: false
+
+      - name: Merge upstream
+        if: inputs.merge_upstream
+        shell: bash
+        run: |
+          git remote add upstream https://github.com/willfaust/Madeira.git
+          git fetch --no-tags upstream "${{ inputs.upstream_ref }}"
+          git -c user.name=ci -c user.email=ci@localhost merge --no-edit FETCH_HEAD
+
+      - name: Compile shaders
+        shell: bash
+        run: |
+          git submodule update --init --depth 1 dxmt
+          xcodebuild -version
+          xcrun -sdk macosx metal --version > /dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+          OUT="$GITHUB_WORKSPACE/shader-headers"
+          mkdir -p "$OUT" && cd "$OUT"
+          for s in air_msad air_samplepos air_tessellation; do
+            xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+              -o "$s.air" -c "$GITHUB_WORKSPACE/dxmt/src/airconv/shaders/$s.metal"
+            xxd -n "$s" -i "$s.air" "$s.h"
+          done
+          xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
+            -o dxmt_command.air -c "$GITHUB_WORKSPACE/dxmt/src/dxmt/dxmt_command.metal"
+          xcrun -sdk macosx metallib -o dxmt_command.metallib dxmt_command.air
+          xxd -n dxmt_command -i dxmt_command.metallib dxmt_command.h
+          rm -f *.air *.metallib
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shader-headers
+          path: shader-headers
+          retention-days: 1
+
   build:
+    needs: shaders
     runs-on: xcode-27
     timeout-minutes: 360
     permissions:
@@ -390,18 +440,12 @@ jobs:
           key: llvm-ios-v1-${{ env.LLVM_TAG }}
 
       # ------------------------------------------------------------------ DXMT
-      # airconv's shader headers, which DXMT's meson build generates
-      # (dxmt/src/airconv/meson.build) and build/dxmt-ios/build.sh expects.
-      - name: Generate airconv shader headers
-        shell: bash
-        run: |
-          OUT=build/dxmt-ios/shader-headers
-          mkdir -p "$OUT"
-          for s in air_msad air_samplepos air_tessellation; do
-            xcrun -sdk macosx metal -std=metal3.1 --target=air64-apple-macos14.0 \
-              -o "$OUT/$s.air" -c "dxmt/src/airconv/shaders/$s.metal"
-            (cd "$OUT" && xxd -n "$s" -i "$s.air" "$s.h")
-          done
+      # Compiled by the shaders job with Xcode 26's Metal compiler.
+      - name: Fetch shader headers
+        uses: actions/download-artifact@v4
+        with:
+          name: shader-headers
+          path: build/dxmt-ios/shader-headers
 
       - name: Build DXMT unix side
         shell: bash

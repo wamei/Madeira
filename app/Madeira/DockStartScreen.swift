@@ -279,6 +279,11 @@ final class DockStartScreen: ObservableObject {
     @Published private(set) var holding = false
     /// A window that may need the user is up behind the starting screen.
     @Published private(set) var attention = false
+    /// The host reported its result after the game's window was up: the game it
+    /// waits for has exited (the host's result, 0 for a normal exit). Valve's
+    /// client keeps the session running, so nothing else ends it, and one
+    /// session runs per app run: LibraryHUD offers to close Madeira.
+    @Published private(set) var gameEnded: Int?
 
     private var hold: SteamLaunchHold?
     private var sceneLines = 0
@@ -291,7 +296,7 @@ final class DockStartScreen: ObservableObject {
     /// A library session begins; `game` is set for a Dock start.
     func begin(_ game: DockGame?, at start: Date) {
         endHold(reason: nil)
-        active = game != nil; appID = game?.id; failure = nil
+        active = game != nil; appID = game?.id; failure = nil; gameEnded = nil
         exitObserved = false; hostStarted = false; early = []; started = start
         guard let game, MadeiraConfig.flag("MADEIRA_DOCK_HIDE_DESKTOP") else { return }   // 0: a Dock start's starting screen ends on the desktop's first frame, as before
         let hold = SteamLaunchHold(autoReveal: MadeiraConfig.flag("MADEIRA_DOCK_AUTO_REVEAL"))   // 0: a window that may need the user never reveals the desktop by itself (Show desktop still does)
@@ -303,7 +308,7 @@ final class DockStartScreen: ObservableObject {
     /// The session ended.
     func finish() {
         endHold(reason: "session-ended")
-        active = false; appID = nil; failure = nil
+        active = false; appID = nil; failure = nil; gameEnded = nil
     }
 
     /// Every 0.5 s from LibraryModel.poll while a session runs. `rendered`: D3D
@@ -318,7 +323,11 @@ final class DockStartScreen: ObservableObject {
             report = current
             if current.result != nil {
                 exitObserved = true
-                if let words = DockStartStatus.failure(result: current.result, words: current.failure, launching: model.launching) {
+                if !model.launching && MadeiraConfig.flag("MADEIRA_DOCK_GAME_ENDED") {   // 0: no Game ended screen; the session stays as it is
+                    gameEnded = current.result ?? 0
+                    LogStore.shared.log("[dock-status] game-ended result=\(current.result ?? 0) t=\(Int(elapsed))s")
+                    MainActor.assumeIsolated { MadeiraDock.cleanup() }
+                } else if let words = DockStartStatus.failure(result: current.result, words: current.failure, launching: model.launching) {
                     failure = words
                     LogStore.shared.log("[dock-status] host-ended result=\(current.result ?? 0) starting=\(model.launching ? 1 : 0)", level: .error)
                     MainActor.assumeIsolated { MadeiraDock.cleanup() }

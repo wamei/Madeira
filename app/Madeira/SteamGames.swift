@@ -857,6 +857,41 @@ struct SteamDownloadStatus: View {
     }
 }
 
+// MARK: - Game language
+
+/// Tells the pages that show a game's language that a choice changed
+/// (SteamLanguage keeps the choices).
+final class SteamGameLanguageChoices: ObservableObject {
+    static let shared = SteamGameLanguageChoices()
+
+    @MainActor func choose(_ appID: Int, _ code: String?) {
+        SteamLanguage.chooseForGame(UInt32(appID), code)
+        objectWillChange.send()
+    }
+}
+
+/// Game language on a Steam game's pages: Default follows Settings › Steam ›
+/// Game language; the list is the languages the game supports (all of them
+/// when the cached library does not say).
+struct SteamGameLanguagePicker: View {
+    let appID: Int
+    @ObservedObject private var steam = SteamOwnedLibrary.shared
+    @ObservedObject private var choices = SteamGameLanguageChoices.shared
+
+    var body: some View {
+        let game = steam.game(appID)
+        let supported = Set((game?.languages ?? []) + (game?.depotLanguages ?? []))
+        let current = SteamLanguage.gameChoice(UInt32(appID))
+        let options = SteamLanguage.all.filter { supported.isEmpty || supported.contains($0.code) || $0.code == current }
+        Picker("Game language", selection: Binding(get: { current ?? "" },
+                                                   set: { choices.choose(appID, $0.isEmpty ? nil : $0) })) {
+            Text("Default (\(SteamLanguage.name(SteamLanguage.download)))").tag("")
+            ForEach(options, id: \.code) { Text($0.name).tag($0.code) }
+        }
+        .pickerStyle(.navigationLink)
+    }
+}
+
 // MARK: - Download sheet
 
 /// A game the account owns that is not installed: Install, Pause, Resume and
@@ -908,6 +943,7 @@ struct SteamGameSheet: View {
                         }
                     }
                     Section {
+                        if item.installed == nil { SteamGameLanguagePicker(appID: appID) }
                         if let freeSpace { LabeledContent("Free space on this device", value: formatBytes(freeSpace)) }
                         Text(SteamGameSheet.downloadNote)
                             .font(.footnote).foregroundStyle(.secondary)
@@ -1173,6 +1209,7 @@ struct SteamEntrySection: View {
     @ObservedObject private var dock = MadeiraDockModel.shared
     @ObservedObject private var steam = SteamOwnedLibrary.shared
     @ObservedObject private var games = SteamGamesModel.shared
+    @ObservedObject private var languageChoices = SteamGameLanguageChoices.shared
     @State private var confirmUninstall = false
     @State private var freeSpace: Int64?
     /// "The game": the install folder's programs (the Program picker) and whether
@@ -1240,7 +1277,8 @@ struct SteamEntrySection: View {
                     .disabled(!steam.signedIn)
             }
             if managed, let recorded = games.languages[appID] {
-                LabeledContent("Language", value: SteamLanguage.name(recorded))
+                if downloads { SteamGameLanguagePicker(appID: appID) }
+                LabeledContent("Installed language", value: SteamLanguage.name(recorded))
                 if downloads, download == nil,
                    let wanted = steam.game(appID)?.languageToDownload(recorded: recorded, installedDepots: games.depots[appID] ?? []) {
                     Button { steam.repair(appID) } label: {

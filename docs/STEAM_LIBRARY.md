@@ -136,7 +136,10 @@ account that owns the depot, so ownership is Steam's decision, not Madeira's.
    redistributables or regional alternates. The game language is
    **Settings › Steam › Game language**, kept in madeira.cfg as
    `env.MADEIRA_STEAM_LANGUAGE` (a Steam API language name such as
-   `japanese`); unset, it follows the device's language. A game with no
+   `japanese`); unset, it follows the device's language.
+   A game's own **Game language** (its download sheet, or the Steam section of
+   its Game details page) overrides the setting for that game; Default follows
+   it. The per-game choices are kept in the app's defaults (`steam-game-languages`). A game with no
    depots in that language takes the English ones, as Valve's client does.
    The install record's `UserConfig.language` names the game language when the
    game supports it (`common.supported_languages`), even if its text is in the

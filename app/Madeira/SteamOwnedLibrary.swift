@@ -81,7 +81,7 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// or nil when an older cache does not say.
     var installLanguage: String? {
         guard let languages, let depotLanguages else { return nil }
-        let wanted = SteamLanguage.download
+        let wanted = SteamLanguage.download(for: UInt32(id))
         if languages.contains(wanted) || depotLanguages.contains(wanted) { return wanted }
         return "english"
     }

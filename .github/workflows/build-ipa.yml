@@ -301,7 +301,8 @@ jobs:
           key: fex-ios-v1-${{ steps.rev.outputs.fex }}
 
       # build/fex-ios/build.sh's options, plus what a hosted runner needs:
-      # cross mode does not infer CMAKE_SYSTEM_PROCESSOR, and no ccache.
+      # cross mode does not infer CMAKE_SYSTEM_PROCESSOR, no ccache, and
+      # TUNE_CPU=native would read /proc/cpuinfo, which macOS does not have.
       - name: Build FEX for iOS
         if: steps.fex.outputs.cache-hit != 'true'
         shell: bash
@@ -313,7 +314,7 @@ jobs:
             -DCMAKE_MACOSX_BUNDLE=OFF \
             -DBUILD_TESTING=OFF -DBUILD_THUNKS=OFF -DBUILD_FEXCONFIG=OFF -DBUILD_FEX_LINUX_TESTS=OFF \
             -DENABLE_FEX_ALLOCATOR=OFF -DENABLE_ASSERTIONS=OFF -DENABLE_CLANG_THUNKS=ON \
-            -DENABLE_CCACHE=OFF -DENABLE_LTO=OFF \
+            -DENABLE_CCACHE=OFF -DENABLE_LTO=OFF -DTUNE_CPU=generic -DTUNE_ARCH=generic \
             > fex-cfg.log 2>&1 || { tail -60 fex-cfg.log; exit 1; }
           cmake --build FEX/build-ios -j"$(sysctl -n hw.ncpu)" \
             --target FEXCore FEXCore_Base JemallocLibs cephes_128bit softfloat_3e fmt xxhash \

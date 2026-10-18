@@ -59,8 +59,11 @@ file is written whole.
 2. Maps each cloud path to a file of Madeira Dock's Wine prefix, through
    the `%Root%` placeholder of the path and the app's `ufs` product info:
    `GameInstall` is the game's folder, `WinAppDataLocalLow` and its
-   siblings are under the Windows user folder (the one Wine names after
-   `$USER`), and a path with no placeholder is under Steam's
+   siblings are under the Windows user folder: the profile the prefix's
+   registry names (ProfileList's `ProfileImagePath`, where Wine points
+   `%USERPROFILE%` and so the games; the template's is `C:\users\mythic`,
+   not the unix user `mobile`), else the one named after `$USER`. A path
+   with no placeholder is under Steam's
    `userdata/<account>/<app>/remote`. Names are matched without regard to
    case. A path that would leave its folder is refused.
 3. Compares SHA-1 and size, and also lists files matching the app's save

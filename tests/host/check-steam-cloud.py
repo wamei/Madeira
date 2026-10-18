@@ -6,7 +6,8 @@ save synced before that is now missing on this device is a choice whose mark kee
 that name from going up over the cloud's copy unasked (the reset-prefix case), and runs the
 production comparison (SteamCloudPaths, SteamCloudAudit) over a synthetic prefix: a save folder
 named with {64BitSteamID} gets a cloud name with the ID filled in, the name the cloud lists for
-that file. Source checks: Steam Cloud is on unless turned off, a game not checked yet syncs before
+that file, and the user folder is the profile the prefix's system.reg names (the template's
+C:\\users\\mythic), over $USER. Source checks: Steam Cloud is on unless turned off, a game not checked yet syncs before
 Play, every upload that replaces a cloud file backs up the cloud's copy first, and backups are in
 Documents.
 """
@@ -136,6 +137,32 @@ let listed = SteamCloudFile(prefix: "%GameInstall%savedata/\(steamID)/", name: "
                             timestamp: 1, size: UInt64(bytes.count), persistState: 0)
 let both = SteamCloudAudit.run(listing: SteamCloudListing(files: [listed]), saveFiles: ufs, paths: paths)
 check(both.entries.count == 1 && both.entries[0].kind == .same, "  and once the cloud lists it under that name, the two are the same file")
+
+// The user folder: the profile the prefix's registry names (the template's C:\users\mythic,
+// where Wine points %USERPROFILE% and so the games), not the unix user's (mobile on a device).
+let users = drive.appendingPathComponent("users", isDirectory: true)
+for user in ["mythic", "mobile"] {
+    try! FileManager.default.createDirectory(at: users.appendingPathComponent(user + "/AppData", isDirectory: true), withIntermediateDirectories: true)
+}
+let registry = #"""
+WINE REGISTRY Version 2
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-18] 1776969665
+"ProfileImagePath"="C:\\windows\\system32\\config\\systemprofile"
+
+[Software\\Microsoft\\Windows NT\\CurrentVersion\\ProfileList\\S-1-5-21-0-0-0-1000] 1776969665
+#time=1dcd350be5e2746
+"Flags"=dword:00000000
+"ProfileImagePath"="C:\\users\\mythic"
+"""#
+try! registry.write(to: tmp.appendingPathComponent("system.reg"), atomically: true, encoding: .utf8)
+setenv("USER", "mobile", 1)
+check(SteamCloudPaths.profileName(prefix: tmp) == "mythic", "the interactive user's profile is read from system.reg (not the system profile)")
+let profile = SteamCloudPaths.userFolder(drive: drive)
+check(profile?.url.lastPathComponent == "mythic" && profile?.how == "profile", "  and it is the user folder, over $USER (mobile)")
+try! FileManager.default.removeItem(at: tmp.appendingPathComponent("system.reg"))
+let fallback = SteamCloudPaths.userFolder(drive: drive)
+check(fallback?.url.lastPathComponent == "mobile" && fallback?.how == "env", "with no registry profile, $USER as before")
 try? FileManager.default.removeItem(at: tmp)
 
 exit(failed == 0 ? 0 : 1)

@@ -86,7 +86,11 @@ jobs:
       - name: Select Xcode
         shell: bash
         run: |
-          NEWEST=$(ls -d /Applications/Xcode_*.app | grep -v -i -E "beta|candidate" | sort -V | tail -1)
+          # Real folders only: the image's version symlinks (Xcode_27.2.app)
+          # point at betas.
+          NEWEST=$(find /Applications -maxdepth 1 -type d -name 'Xcode_*.app' ! -iname '*beta*' | while read -r d; do
+              echo "$(defaults read "$d/Contents/Info" CFBundleShortVersionString) $d"
+            done | sort -V | tail -1 | cut -d' ' -f2-)
           sudo xcode-select -s "${NEWEST:-/Applications/Xcode.app}/Contents/Developer"
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
@@ -362,7 +366,7 @@ jobs:
             -DCMAKE_C_COMPILER=/usr/bin/clang -DCMAKE_CXX_COMPILER=/usr/bin/clang++ \
             -DLLVM_TABLEGEN="$GITHUB_WORKSPACE/toolchains/llvm-host-build/bin/llvm-tblgen" \
             -DCMAKE_MACOSX_BUNDLE=OFF \
-            -DLLVM_BUILD_UTILS=Off -DLLVM_BUILD_TOOLS=Off -DLLVM_TARGETS_TO_BUILD="" \
+            -DLLVM_BUILD_UTILS=Off -DLLVM_BUILD_TOOLS=Off -DLLVM_INCLUDE_TOOLS=Off -DLLVM_TARGETS_TO_BUILD="" \
             -DLLVM_INCLUDE_TESTS=Off -DLLVM_INCLUDE_EXAMPLES=Off \
             -DLLVM_INCLUDE_BENCHMARKS=Off -DLLVM_INCLUDE_UTILS=Off \
             -DLLVM_ENABLE_TERMINFO=Off -DLLVM_ENABLE_LIBXML2=Off \

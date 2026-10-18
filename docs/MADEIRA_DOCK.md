@@ -481,7 +481,13 @@ configured engine again.
 - **Automatic session end and the exit-status hook.** These need the ntdll
   program start/exit hooks from the front-end PR. Here, the result comes from
   the report file, and the session ends as other developer-interface
-  sessions do.
+  sessions do. Until then, a result the host reports after the game's window
+  was up (the host waits for the game it started) shows **The game has
+  ended** over the session, which Valve's client keeps running and which
+  would otherwise stay black: **Upload saves and close Madeira** (Steam Cloud,
+  as in the game menu), **Close Madeira**, or **Back to the game** for a game
+  whose launcher exited while the game runs on. `env.MADEIRA_DOCK_GAME_ENDED
+  = 0` turns the panel off. Log: `[dock-status] game-ended result=...`.
 - Heap, D3D9-census and pool-pressure defaults for Dock sessions (fork engine
   policies).
 

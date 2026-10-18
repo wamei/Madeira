@@ -3956,7 +3956,38 @@ struct LibraryHUD: View {
     @State private var launchVisible = false
     /// The Session menu's Controller binds page (keyboard-and-mouse mode).
     @State private var bindsPage = false
+    /// Back to the game on the Game ended panel: the panel stays away for this exit.
+    @State private var gameEndedHidden = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// A Dock start's game exited (DockStartScreen.gameEnded) while Valve's client
+    /// keeps the session, which shows black. One session runs per app run, so the
+    /// way on is to close Madeira: after uploading the game's saves to Steam Cloud
+    /// (SteamCloudQuitRow), or at once. Back to the game hides the panel, for a
+    /// game whose launcher exited while the game runs on.
+    private func gameEndedPanel(result: Int) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label("The game has ended", systemImage: "flag.checkered").font(.title3.bold())
+            if result != 0 {
+                Text("Madeira Dock reported result \(result).").font(.callout).foregroundStyle(.secondary)
+            }
+            Text("Madeira runs one game session per launch. Close Madeira, then open it again to play.")
+                .font(.callout).foregroundStyle(.secondary)
+            if let appID = dockStart.appID ?? model.activeEntry?.steamAppID, SteamOwnedLibrary.cloudQuitEnabled {
+                SteamCloudQuitRow(appID: appID)
+                Divider()
+            }
+            Button(role: .destructive) {
+                LogStore.shared.log("[dock-status] game-ended close")
+                exit(0)
+            } label: {
+                Label("Close Madeira", systemImage: "xmark.circle")
+            }
+            Button("Back to the game") { gameEndedHidden = true }
+                .font(.callout)
+        }
+        .padding(24)
+    }
     var body: some View {
         GeometryReader { geo in
             ZStack(alignment: .topLeading) {
@@ -3982,7 +4013,16 @@ struct LibraryHUD: View {
                         .position(x: geo.size.width / 2, y: geo.size.height / 2)
                         .transition(reduceMotion ? .opacity : .scale(scale: 0.94).combined(with: .opacity))
                 }
+                if let result = dockStart.gameEnded, !model.launching, !model.menu, !gameEndedHidden {
+                    Color.black.opacity(0.75).ignoresSafeArea()
+                    gameEndedPanel(result: result)
+                        .frame(width: min(460, geo.size.width - 32))
+                        .background(Color(uiColor: .secondarySystemBackground), in: RoundedRectangle(cornerRadius: 28))
+                        .overlay(RoundedRectangle(cornerRadius: 28).stroke(.white.opacity(0.15)))
+                        .position(x: geo.size.width / 2, y: geo.size.height / 2)
+                }
             }
+            .onChange(of: dockStart.gameEnded) { _, _ in gameEndedHidden = false }
             .animation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85), value: model.menu)
             .onAppear {
                 withAnimation(.easeOut(duration: reduceMotion ? 0.15 : 0.35)) { launchVisible = true }

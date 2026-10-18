@@ -247,7 +247,7 @@ final class DepotDownloader {
                 try AppManifestWriter.mergeOwnerManifest(ownerAppID: ownerID, ownerName: owner.name, ownerBuildID: owner.buildID,
                                                          installDir: ownerFolder.isEmpty ? folderName : ownerFolder,
                                                          steamID: accountID, steamAppsPath: steamApps.path,
-                                                         depots: depots)
+                                                         depots: depots, language: app.gameLanguage)
                 written += 1
             }
             SteamLog.event("[steam-shared-record] app=\(app.appID) shared=\(shared.count) owners-written=\(written) owners-skipped=\(skipped)")

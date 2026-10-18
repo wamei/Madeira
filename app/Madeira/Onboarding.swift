@@ -720,9 +720,7 @@ struct SteamSettingsSection: View {
         } header: {
             Text("Steam")
         } footer: {
-            Text("Game language: the language Steam downloads install, and the one Steam tells the game to use. A game without it gets English. Installed games keep their language until you choose Download in their page.
-
-Madeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.")
+            Text("Game language: the language Steam downloads install, and the one Steam tells the game to use. A game without it gets English. Installed games keep their language until you choose Download in their page.\n\nMadeira keeps a Steam sign-in token in this device's Keychain, for this device only. Signing out removes it.")
         }
         .confirmationDialog("Sign out of Steam?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) { signIn.signOut() }

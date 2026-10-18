@@ -1,5 +1,5 @@
 # Runs Madeira's host checks (tests/host/*.py) on a branch, the way their
-# headers ask: swiftc on Linux, cc, python3 with cryptography, and the
+# headers ask: swiftc, cc, python3 with cryptography, and the
 # libssl/liblzma/zlib development files. No Steam, no device.
 name: Host checks
 
@@ -13,11 +13,15 @@ on:
       checks:
         description: Space-separated tests/host scripts (file names)
         type: string
-        default: check-steam-library.py check-steam-cloud.py
+        default: check-steam-library.py
+      runner:
+        description: ubuntu-24.04 for the Linux checks; macos-15 for those that need Apple frameworks (CryptoKit)
+        type: string
+        default: ubuntu-24.04
 
 jobs:
   checks:
-    runs-on: ubuntu-24.04
+    runs-on: ${{ inputs.runner }}
     permissions:
       contents: read
     steps:
@@ -26,11 +30,19 @@ jobs:
           ref: ${{ inputs.ref }}
           submodules: false
 
+      # compression.zstd (check-steam-library.py's test vectors) is Python 3.14's.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.14'
+
       - name: Tools
         shell: bash
         run: |
-          sudo apt-get update -q
-          sudo apt-get install -y -q libssl-dev liblzma-dev zlib1g-dev python3-cryptography
+          python3 -m pip install -q cryptography
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update -q
+            sudo apt-get install -y -q libssl-dev liblzma-dev zlib1g-dev
+          fi
           if ! command -v swiftc > /dev/null; then
             curl -fsSL https://download.swift.org/swift-6.1.2-release/ubuntu2404/swift-6.1.2-RELEASE/swift-6.1.2-RELEASE-ubuntu24.04.tar.gz -o /tmp/swift.tgz
             sudo mkdir -p /opt/swift && sudo tar -xzf /tmp/swift.tgz -C /opt/swift --strip-components=1
@@ -41,11 +53,11 @@ jobs:
         shell: bash
         run: |
           swiftc --version
+          python3 --version
           status=0
           for check in ${{ inputs.checks }}; do
             echo "::group::$check"
-            python3 "tests/host/$check" || status=1
+            python3 "tests/host/$check" || { status=1; echo "::error::$check failed"; }
             echo "::endgroup::"
-            [ "$status" -eq 0 ] || echo "::error::$check failed"
           done
           exit "$status"

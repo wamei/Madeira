@@ -142,7 +142,8 @@ account that owns the depot, so ownership is Steam's decision, not Madeira's.
    game supports it (`common.supported_languages`), even if its text is in the
    common content, so Valve's client starts the game in it; else the depot
    language. An installed game's page shows its language and, when the setting
-   differs, **Download in <language>**, which runs Repair with the new
+   differs or the record lacks that language's depots (a record edited by
+   hand), **Download in <language>**, which runs Repair with the new
    selection (the files of the previous language stay). Log:
    `[steam-depot] selection ... language=<depots>/<record>`.
 2. For each depot: the depot key, the manifest request code, a per-server

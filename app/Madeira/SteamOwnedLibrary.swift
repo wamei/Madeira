@@ -39,6 +39,10 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
     /// Steam's launch configuration, for "Start with: The game" (SteamDirectStart);
     /// nil in older caches, which then ask Steam once (SteamOwnedLibrary.launchOptions).
     var launches: [SteamLaunchOption]?
+    /// Steam API language names the game supports and those it has language
+    /// depots for (SteamAppInfo.languages, DepotInfo.language); nil in older caches.
+    var languages: [String]?
+    var depotLanguages: [String]?
 
     init(_ info: SteamAppInfo) {
         id = Int(info.appID)
@@ -48,6 +52,17 @@ struct SteamOwnedGame: Codable, Identifiable, Hashable, Sendable {
         libraryCapsule = info.libraryCapsule; libraryHero = info.libraryHero; headerImage = info.headerImage
         parentID = info.parentID.map(Int.init)
         launches = info.launches
+        languages = info.languages.sorted()
+        depotLanguages = Set(info.depots.map { $0.language.lowercased() }.filter { !$0.isEmpty }).sorted()
+    }
+
+    /// The language an install made now would record (SteamAppInfo.gameLanguage),
+    /// or nil when an older cache does not say.
+    var installLanguage: String? {
+        guard let languages, let depotLanguages else { return nil }
+        let wanted = SteamLanguage.download
+        if languages.contains(wanted) || depotLanguages.contains(wanted) { return wanted }
+        return "english"
     }
 
     var folderName: String { SteamInstallFiles.safeFolderName(installDir.isEmpty ? "app_\(id)" : installDir) }

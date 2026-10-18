@@ -39,7 +39,8 @@ struct AppManifestWriter {
         steamAppsPath: String,
         installedDepots: [InstalledDepot]? = nil,
         sharedDepots: [(depotID: Int, ownerAppID: Int)] = [],
-        customExecutables: [String] = []
+        customExecutables: [String] = [],
+        language: String = "english"
     ) throws {
         let manifestPath = (steamAppsPath as NSString).appendingPathComponent("appmanifest_\(appID).acf")
 
@@ -126,15 +127,17 @@ struct AppManifestWriter {
         }
 
         // UserConfig and MountedConfig are present in every record Steam
-        // writes; Steam uses them to select language-pack depots. English is
-        // always written (the downloader installs English content).
+        // writes; Steam uses them to select language-pack depots and reports
+        // the language to the game. The downloader passes the language it
+        // installed (SteamAppInfo.gameLanguage).
+        let language = escapeVDFString(language)
         lines.append("\t\"UserConfig\"")
         lines.append("\t{")
-        lines.append("\t\t\"language\"\t\t\"english\"")
+        lines.append("\t\t\"language\"\t\t\"\(language)\"")
         lines.append("\t}")
         lines.append("\t\"MountedConfig\"")
         lines.append("\t{")
-        lines.append("\t\t\"language\"\t\t\"english\"")
+        lines.append("\t\t\"language\"\t\t\"\(language)\"")
         lines.append("\t}")
 
         lines.append("}")

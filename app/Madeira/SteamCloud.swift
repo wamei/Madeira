@@ -99,9 +99,13 @@ struct SteamCloudPaths: Sendable {
     var overrides: [SteamAppInfo.RootOverride]
 
     /// The Windows user folder games write to. A prefix can hold several
-    /// folders under users (the template's, earlier builds'); Wine names the
-    /// live one after $USER, else the passwd name, so those are tried first,
-    /// then the most recently changed. nil when the prefix has none yet.
+    /// folders under users (the template's, earlier builds'). Games find theirs
+    /// through the profile the registry names (ProfileList's
+    /// ProfileImagePath, from which Wine sets %USERPROFILE%): the prefix
+    /// template names C:\users\mythic, while the unix user is "mobile", and
+    /// syncing the $USER folder left a game's saves where it never looked. So
+    /// the registry's profile first, then $USER, then the passwd name, then the
+    /// most recently changed. nil when the prefix has none yet.
     static func userFolder(drive: URL) -> (url: URL, candidates: Int, how: String)? {
         let users = drive.appendingPathComponent("users", isDirectory: true)
         guard let names = try? FileManager.default.contentsOfDirectory(atPath: users.path) else { return nil }
@@ -110,6 +114,7 @@ struct SteamCloudPaths: Sendable {
             guard let name, let match = own.first(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) else { return nil }
             return users.appendingPathComponent(match, isDirectory: true)
         }
+        if let url = find(profileName(prefix: drive.deletingLastPathComponent())) { return (url, own.count, "profile") }
         if let url = find(getenv("USER").map { String(cString: $0) }) { return (url, own.count, "env") }
         if let entry = getpwuid(getuid()), let url = find(String(cString: entry.pointee.pw_name)) { return (url, own.count, "passwd") }
         func changed(_ name: String) -> Date {
@@ -118,6 +123,32 @@ struct SteamCloudPaths: Sendable {
         }
         guard let newest = own.max(by: { changed($0) < changed($1) }) else { return nil }
         return (users.appendingPathComponent(newest, isDirectory: true), own.count, "newest")
+    }
+
+    /// The folder name under C:\users of the interactive user's profile in the
+    /// prefix's system.reg (ProfileList\S-1-5-21-...\ProfileImagePath), or nil.
+    static func profileName(prefix: URL) -> String? {
+        let url = prefix.appendingPathComponent("system.reg")
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 64 << 20,
+              let data = try? Data(contentsOf: url), let text = String(data: data, encoding: .utf8) else { return nil }
+        var inUserProfile = false
+        for line in text.split(whereSeparator: \.isNewline) {
+            if line.hasPrefix("[") {
+                inUserProfile = line.lowercased().contains(#"\\profilelist\\s-1-5-21-"#)
+                continue
+            }
+            guard inUserProfile, line.hasPrefix(#""ProfileImagePath"="#) else { continue }
+            // "C:\\users\\name" or str(2):"%SystemDrive%\\users\\name"
+            guard let open = line.firstIndex(of: "\""),
+                  let value = line[line.index(after: open)...].split(separator: "=", maxSplits: 1).last else { continue }
+            let path = value.trimmingCharacters(in: CharacterSet(charactersIn: "\" ")).replacingOccurrences(of: #"\\"#, with: #"\"#)
+            let parts = path.split(separator: "\\")
+            guard let index = parts.lastIndex(where: { $0.caseInsensitiveCompare("users") == .orderedSame }),
+                  index + 1 < parts.count else { continue }
+            let name = String(parts[index + 1])
+            return name.isEmpty || name.contains("/") || name == "." || name == ".." ? nil : name
+        }
+        return nil
     }
 
     /// The local folder a Steam root name stands for on Windows, or nil for a

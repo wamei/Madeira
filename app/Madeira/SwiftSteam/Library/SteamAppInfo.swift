@@ -159,7 +159,7 @@ struct SteamAppInfo {
     /// (SteamLanguage) when the app has depots for it, else English, as
     /// Valve's client falls back.
     var depotLanguage: String {
-        let wanted = SteamLanguage.download
+        let wanted = SteamLanguage.download(for: appID)
         return depots.contains { $0.language.caseInsensitiveCompare(wanted) == .orderedSame } ? wanted : "english"
     }
 
@@ -168,7 +168,7 @@ struct SteamAppInfo {
     /// the app supports it, even with no depot of its own (text in the common
     /// content), else the depot language.
     var gameLanguage: String {
-        let wanted = SteamLanguage.download
+        let wanted = SteamLanguage.download(for: appID)
         return languages.contains(wanted) ? wanted : depotLanguage
     }
 
@@ -493,6 +493,26 @@ enum SteamLanguage {
 
     /// The language downloads use now.
     static var download: String { chosen ?? device }
+
+    /// The language one game's downloads use: its own choice on its page, else
+    /// the setting's.
+    static func download(for appID: UInt32) -> String { gameChoice(appID) ?? download }
+
+    /// Per-game choices (Game language on the game's page), by App ID, kept in
+    /// the app's defaults; a game without one follows the setting.
+    private static let gameChoicesKey = "steam-game-languages"
+
+    static func gameChoice(_ appID: UInt32) -> String? {
+        let value = (UserDefaults.standard.dictionary(forKey: gameChoicesKey) as? [String: String])?[String(appID)]
+        return value.flatMap { code in all.contains { $0.code == code } ? code : nil }
+    }
+
+    static func chooseForGame(_ appID: UInt32, _ code: String?) {
+        var choices = UserDefaults.standard.dictionary(forKey: gameChoicesKey) as? [String: String] ?? [:]
+        choices[String(appID)] = code
+        UserDefaults.standard.set(choices, forKey: gameChoicesKey)
+        SteamLog.event("[steam-language] app=\(appID) choice=\(code ?? "setting") download=\(download(for: appID))")
+    }
 
     /// The device's preferred language as a Steam API name, English when Steam
     /// has none for it.

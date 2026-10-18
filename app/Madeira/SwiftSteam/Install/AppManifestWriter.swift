@@ -155,7 +155,7 @@ struct AppManifestWriter {
     /// now replace their older entries. Nothing is recorded that was not installed.
     static func mergeOwnerManifest(ownerAppID: UInt32, ownerName: String, ownerBuildID: UInt32, installDir: String,
                                    steamID: UInt64, steamAppsPath: String,
-                                   depots: [InstalledDepot]) throws {
+                                   depots: [InstalledDepot], language: String = "english") throws {
         let path = (steamAppsPath as NSString).appendingPathComponent("appmanifest_\(ownerAppID).acf")
         var merged: [Int: InstalledDepot] = [:]
         if let data = FileManager.default.contents(atPath: path), data.count <= 1 << 20,
@@ -173,7 +173,8 @@ struct AppManifestWriter {
         let size = all.reduce(UInt64(0)) { $0 &+ UInt64(max(0, $1.size ?? 0)) }
         try writeManifest(appID: ownerAppID, name: ownerName.isEmpty ? "App \(ownerAppID)" : ownerName,
                           installDir: installDir, buildID: ownerBuildID, steamID: steamID,
-                          sizeOnDisk: size, steamAppsPath: steamAppsPath, installedDepots: all)
+                          sizeOnDisk: size, steamAppsPath: steamAppsPath, installedDepots: all,
+                          language: language)
     }
 
     /// One depot entry inside `InstalledDepots`. The manifest and size are

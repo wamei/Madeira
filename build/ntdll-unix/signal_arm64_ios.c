@@ -12124,6 +12124,95 @@ static int ios_subfloor_backing_probe( uintptr_t real, unsigned bytes, int need_
     return 1;
 }
 
+/* madeira-bcd [kuser-read]: WHAT a guest reads from KUSER_SHARED_DATA, and what
+ * the page holds when it does. A protected game (The Adventures of Elliot) read
+ * this page ~40,000 times in four seconds through the sub-floor window, then
+ * dereferenced a pointer computed from what it had read and faulted. Counting
+ * the offsets it reads, and dumping the page once while it is doing so, lets
+ * the values be compared with a real Windows page. Diagnostic only: nothing is
+ * changed. MADEIRA_KUSER_TRACE=0 turns it off. */
+static void ios_subfloor_kuser_note( uint64_t addr, uintptr_t real, unsigned bytes )
+{
+    static int enabled = -1;
+    static unsigned counts[1024];
+    static unsigned char width[1024];
+    static unsigned long long total;
+    uint64_t off;
+
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_KUSER_TRACE" );
+        enabled = !(e && e[0] == '0');
+    }
+    if (!enabled || addr < 0x7ffe0000ull || addr >= 0x7ffe1000ull) return;
+    off = addr - 0x7ffe0000ull;
+    counts[off >> 2]++;
+    if (bytes > width[off >> 2]) width[off >> 2] = (unsigned char)bytes;
+    total++;
+
+    if (total == 4096 || total == 32768 || total == 262144)
+    {
+        /* the 40 most-read 4-byte slots */
+        char line[1600];
+        int n = 0, k, i;
+        unsigned char taken[1024] = { 0 };
+        for (k = 0; k < 40; k++)
+        {
+            int best = -1;
+            for (i = 0; i < 1024; i++)
+                if (!taken[i] && counts[i] && (best < 0 || counts[i] > counts[best])) best = i;
+            if (best < 0) break;
+            taken[best] = 1;
+            n += snprintf( line + n, sizeof(line) - n, " %#x:%u(%ub)", best * 4, counts[best], width[best] );
+            if (n >= (int)sizeof(line) - 32) break;
+        }
+        dprintf( 2, "[kuser-read] %llu reads of KUSER_SHARED_DATA; most-read offsets (offset:count(width)):%s\n",
+                 total, line );
+    }
+    if (total == 4096)
+    {
+        /* the page itself, once, 0x000-0x720 (through XState) */
+        const unsigned char *page = (const unsigned char *)(real - (uintptr_t)off);
+        unsigned char buf[0x720];
+        mach_vm_size_t got = 0;
+        unsigned o;
+        if (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(uintptr_t)page, sizeof(buf),
+                                    (mach_vm_address_t)buf, &got ) != KERN_SUCCESS || got != sizeof(buf))
+        {
+            dprintf( 2, "[kuser-read] page at %p unreadable\n", (const void *)page );
+            return;
+        }
+#define KU32(o) (*(const unsigned int *)(buf + (o)))
+#define KU16(o) (*(const unsigned short *)(buf + (o)))
+#define KU64(o) (*(const unsigned long long *)(buf + (o)))
+        dprintf( 2, "[kuser-read] fields: TickCountMultiplier=%#x NtBuildNumber=%u NtProductType=%u "
+                 "ProductTypeIsValid=%u NativeProcessorArchitecture=%u NtMajor=%u NtMinor=%u SuiteMask=%#x "
+                 "KdDebuggerEnabled=%#x MitigationPolicies=%#x NumberOfPhysicalPages=%u SafeBootMode=%u "
+                 "SharedDataFlags=%#x QpcFrequency=%llu SystemCall=%u ActiveProcessorCount=%u ActiveGroupCount=%u "
+                 "QpcData=%#x Cookie=%#x ImageNumber=%#x-%#x XStateEnabledFeatures=%#llx\n",
+                 KU32(0x004), KU32(0x260), KU32(0x264), buf[0x268], KU16(0x26a), KU32(0x26c), KU32(0x270),
+                 KU32(0x2d0), buf[0x2d4], buf[0x2d5], KU32(0x2e8), buf[0x2ec], KU32(0x2f0), KU64(0x300),
+                 KU32(0x308), KU32(0x3c0), buf[0x3c4], KU16(0x3c6), KU32(0x330), KU16(0x2c), KU16(0x2e),
+                 KU64(0x3d8) );
+        {
+            char pf[200];
+            int m = 0;
+            for (o = 0; o < 64; o++) m += snprintf( pf + m, sizeof(pf) - m, "%u", buf[0x274 + o] ? 1 : 0 );
+            dprintf( 2, "[kuser-read] ProcessorFeatures[0..63]=%s\n", pf );
+        }
+        for (o = 0; o < sizeof(buf); o += 32)
+        {
+            char hex[100];
+            int m = 0, j;
+            for (j = 0; j < 32; j++) m += snprintf( hex + m, sizeof(hex) - m, "%02x", buf[o + j] );
+            dprintf( 2, "[kuser-read] %03x: %s\n", o, hex );
+        }
+#undef KU32
+#undef KU16
+#undef KU64
+    }
+}
+
 static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *via, void *peb )
 {
     uint64_t addr = (uint64_t)(uintptr_t)fault_addr;
@@ -12344,6 +12433,7 @@ static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *
     }
 
     ios_subfloor_writeback( ctx, insn, addr );
+    ios_subfloor_kuser_note( addr, real, bytes );
     /* ml1055: WHO is touching the window. One run serviced 12,029,953 of these
      * through the Mach exception path (~18,000 a second, a fifth of all running
      * CPU samples were in mach_msg). Whether the accessor is the sub-floor

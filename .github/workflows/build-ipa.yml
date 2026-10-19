@@ -183,6 +183,13 @@ jobs:
           path: toolchains/${{ env.MINGW_NAME }}
           key: ${{ env.MINGW_NAME }}
 
+      # The ARM64EC FEX module is otherwise the prebuilt DLL committed under
+      # app/Madeira/arm64ec-windows; rebuild it from the pinned FEX so FEX-side
+      # changes ship in this IPA.
+      - name: Build FEX ARM64EC (xtajit64.dll)
+        shell: bash
+        run: build/fex-arm64ec/build.sh > "$GITHUB_WORKSPACE/fex-arm64ec-build.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/fex-arm64ec-build.log"; exit 1; }
+
       # ------------------------------------------------------------------ Wine
       # Host tools (widl, wrc, winebuild...) for the cross-configured tree.
       - name: Restore native Wine tools

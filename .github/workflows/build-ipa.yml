@@ -188,7 +188,14 @@ jobs:
       # changes ship in this IPA.
       - name: Build FEX ARM64EC (xtajit64.dll)
         shell: bash
-        run: build/fex-arm64ec/build.sh > "$GITHUB_WORKSPACE/fex-arm64ec-build.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/fex-arm64ec-build.log"; exit 1; }
+        run: |
+          build/fex-arm64ec/build.sh > "$GITHUB_WORKSPACE/fex-arm64ec-build.log" 2>&1 || { tail -80 "$GITHUB_WORKSPACE/fex-arm64ec-build.log"; exit 1; }
+          # Symbol map for resolving the raw addresses FEX diagnostics log
+          # (build-logs artifact): image base from the headers, then symbols.
+          T="$GITHUB_WORKSPACE/toolchains/$MINGW_NAME/bin"
+          D=FEX/build-arm64ec/Bin/libarm64ecfex.dll
+          { "$T/llvm-readobj" --file-headers "$D" | grep -i 'ImageBase'; "$T/llvm-nm" -n -C "$D"; } \
+            > "$GITHUB_WORKSPACE/fex-arm64ec-syms.log" 2>&1 || true
 
       # ------------------------------------------------------------------ Wine
       # Host tools (widl, wrc, winebuild...) for the cross-configured tree.

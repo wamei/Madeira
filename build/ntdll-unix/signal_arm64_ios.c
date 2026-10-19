@@ -12434,6 +12434,52 @@ static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *
 
     ios_subfloor_writeback( ctx, insn, addr );
     ios_subfloor_kuser_note( addr, real, bytes );
+    /* madeira-bcd [subfloor-rip]: every access made from ONE guest block, with the
+     * host instruction around the faulting PC and the registers it uses after the
+     * emulation. A protected game computes a pointer from two reads of the same
+     * KUSER qword and the two disagree by exactly the window's relocation; this
+     * shows which host instruction sees which value. MADEIRA_SUBFLOOR_TRACE_RIP=<hex
+     * guest block entry> and/or MADEIRA_SUBFLOOR_TRACE_ADDR=<hex guest address>
+     * turn it on (State.rip is not refreshed on linked branches, so the address is
+     * the dependable filter); 128 lines at most. */
+    {
+        static int trace_init;
+        static uint64_t trace_rip, trace_addr;
+        static unsigned trace_n;
+        if (!trace_init)
+        {
+            const char *e = getenv( "MADEIRA_SUBFLOOR_TRACE_RIP" );
+            trace_rip = e ? strtoull( e, NULL, 16 ) : 0;
+            e = getenv( "MADEIRA_SUBFLOOR_TRACE_ADDR" );
+            trace_addr = e ? strtoull( e, NULL, 16 ) : 0;
+            trace_init = 1;
+        }
+        if ((trace_rip || trace_addr) && trace_n < 128)
+        {
+            uint64_t x28 = REGn_sig( 28, ctx ), grip = 0;
+            mach_vm_size_t g = 0;
+            if (x28 >= 0x100000000ULL && x28 < 0xfffffff000000000ULL &&
+                (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(x28 + 0x18), 8,
+                                         (mach_vm_address_t)&grip, &g ) != KERN_SUCCESS || g != 8))
+                grip = 0;
+            if ((trace_rip && grip == trace_rip) || (trace_addr && addr == trace_addr))
+            {
+                uint32_t words[7] = { 0 };
+                const int rt = insn & 0x1F, rn = (insn >> 5) & 0x1F;
+                g = 0;
+                mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(PC_sig(ctx) - 12), sizeof(words),
+                                        (mach_vm_address_t)words, &g );
+                trace_n++;
+                dprintf( 2, "[subfloor-rip] #%u block=%#llx guest %#llx (%u bytes) pc=%#llx insn=%08x "
+                         "rt=x%d=%#llx rn=x%d=%#llx | host %08x %08x %08x [%08x] %08x %08x %08x\n",
+                         trace_n, (unsigned long long)grip, (unsigned long long)addr, bytes,
+                         (unsigned long long)PC_sig(ctx), insn,
+                         rt, rt == 31 ? 0ULL : (unsigned long long)REGn_sig( rt, ctx ),
+                         rn, rn == 31 ? 0ULL : (unsigned long long)REGn_sig( rn, ctx ),
+                         words[0], words[1], words[2], words[3], words[4], words[5], words[6] );
+            }
+        }
+    }
     /* ml1055: WHO is touching the window. One run serviced 12,029,953 of these
      * through the Mach exception path (~18,000 a second, a fifth of all running
      * CPU samples were in mach_msg). Whether the accessor is the sub-floor

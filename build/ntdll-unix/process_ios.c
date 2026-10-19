@@ -3188,6 +3188,59 @@ unavailable:
     dprintf( 2, "[guest-operand] recognized JMP [RSP+disp8], current operand unavailable\n" );
 }
 
+/* madeira-bcd [guest-hex]: the current guest bytes of [start, end), 32 per line,
+ * read with mach_vm_read so an unmapped range only ends the dump. Protected code
+ * decrypts itself, so the file on disk is not the code that ran. */
+static void ios_guest_hex_dump( const char *tag, uint64_t start, uint64_t end )
+{
+    unsigned char line[32];
+    uint64_t at;
+
+    if (end <= start || end - start > 4096) end = start + 4096;
+    for (at = start; at < end; at += sizeof(line))
+    {
+        mach_vm_size_t got = 0, n = end - at < sizeof(line) ? end - at : sizeof(line);
+        char hex[sizeof(line) * 3 + 1];
+        unsigned i, m = 0;
+        if (mach_vm_read_overwrite( mach_task_self(), at, n, (mach_vm_address_t)line, &got ) != KERN_SUCCESS ||
+            got != n)
+        {
+            dprintf( 2, "[guest-hex] %s %#llx unreadable\n", tag, (unsigned long long)at );
+            return;
+        }
+        for (i = 0; i < n; i++) m += snprintf( hex + m, sizeof(hex) - m, "%02x ", line[i] );
+        dprintf( 2, "[guest-hex] %s %#llx: %s\n", tag, (unsigned long long)at, hex );
+    }
+}
+
+static void ios_guest_branch_history_dump( const void *frame, uint64_t fault_rip, void *owner );
+
+/* The bytes along the last recorded exits: from each of the newest three
+ * targets to where execution left it (the next exit's source, or the fault),
+ * plus one instruction's worth of slack. */
+static void ios_guest_path_hex_dump( const void *frame, uint64_t fault_rip )
+{
+    extern unsigned ios_fex_branch_history_offset( void );
+    struct { uint64_t magic, serial; struct { uint64_t source, target, block, hint; } edges[8]; } history;
+    uint64_t address = (uint64_t)(uintptr_t)frame, end;
+    unsigned offset = ios_fex_branch_history_offset(), i;
+    mach_vm_size_t got = 0;
+    char tag[16];
+
+    if (!offset || !address ||
+        mach_vm_read_overwrite( mach_task_self(), address + offset, sizeof(history),
+            (mach_vm_address_t)&history, &got ) != KERN_SUCCESS || got != sizeof(history) ||
+        history.magic != UINT64_C(0x314744454742444d) || history.serial < 3) return;
+    for (i = 0; i < 3; i++)
+    {
+        uint64_t target = history.edges[(history.serial - 1 - i) & 7].target;
+        end = i ? history.edges[(history.serial - i) & 7].source : fault_rip;
+        if (end < target || end - target > 4096) end = target + 512;
+        snprintf( tag, sizeof(tag), "edge#%u", i );
+        ios_guest_hex_dump( tag, target, end + 16 );
+    }
+}
+
 static void ios_guest_branch_history_dump( const void *frame, uint64_t fault_rip, void *owner )
 {
     extern unsigned ios_fex_branch_history_offset( void );
@@ -3346,6 +3399,8 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
                          * itself unavailable or empty when the recorder is off. */
                         ios_guest_block_dump( fx[0], rip, cur_teb->Peb, 0 );
                         ios_guest_branch_history_dump( fex_state, rip, cur_teb->Peb );
+                        ios_guest_path_hex_dump( fex_state, rip );
+                        if (gregs[4] > 64) ios_guest_hex_dump( "stack", gregs[4] - 64, gregs[4] + 256 );
                     }
                     dprintf(2, "[term-stack] g0-7: %llx %llx %llx %llx %llx %llx %llx %llx\n",
                             gregs[0], gregs[1], gregs[2], gregs[3],

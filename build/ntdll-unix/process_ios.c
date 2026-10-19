@@ -3336,6 +3336,17 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
                         ios_guest_block_dump( fx[0], rip, cur_teb->Peb, 0 );
                         ios_guest_branch_history_dump( fex_state, rip, cur_teb->Peb );
                     }
+                    else if (exit_code == (LONG)STATUS_ACCESS_VIOLATION &&
+                             (!handle || handle == NtCurrentProcess()))
+                    {
+                        /* madeira-bcd: an access violation ends a process that the
+                         * recorder (MADEIRA_FEX_BRANCH_HISTORY) may be watching too: a
+                         * protected game faults on a pointer it computed, and the exits
+                         * that led there are what explains the value. The history reports
+                         * itself unavailable or empty when the recorder is off. */
+                        ios_guest_block_dump( fx[0], rip, cur_teb->Peb, 0 );
+                        ios_guest_branch_history_dump( fex_state, rip, cur_teb->Peb );
+                    }
                     dprintf(2, "[term-stack] g0-7: %llx %llx %llx %llx %llx %llx %llx %llx\n",
                             gregs[0], gregs[1], gregs[2], gregs[3],
                             gregs[4], gregs[5], gregs[6], gregs[7]);

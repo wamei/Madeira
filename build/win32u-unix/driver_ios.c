@@ -1117,9 +1117,9 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
              * from the log. Static controls carry a message box's body. */
             {
                 WCHAR clsW[64], txtW[200];
-                char cls[64], txt[200];
+                char cls[64], txt[600];
                 UNICODE_STRING us = { 0, sizeof(clsW), clsW };
-                int j, tn;
+                int j, k, tn;
                 cls[0] = 0;
                 if (NtUserGetClassName( hwnd, FALSE, &us ) > 0)
                 {
@@ -1128,9 +1128,26 @@ static void winios_drv_window_pos_changed( HWND hwnd, HWND insert_after, HWND ow
                     cls[j] = 0;
                 }
                 tn = NtUserInternalGetWindowText( hwnd, txtW, ARRAY_SIZE(txtW) );
-                for (j = 0; j < tn && j < 199; j++)
-                    txt[j] = (txtW[j] >= 32 && txtW[j] < 127) ? (char)txtW[j] : '?';
-                txt[j] = 0;
+                /* madeira-bcd: UTF-8, so a localized message box (Japanese text
+                 * a missing font draws as boxes) is still readable here. */
+                for (j = k = 0; j < tn && j < 199 && k < (int)sizeof(txt) - 4; j++)
+                {
+                    WCHAR c = txtW[j];
+                    if (c < 32 || c == 127 || (c >= 0xd800 && c < 0xe000)) txt[k++] = '?';
+                    else if (c < 0x80) txt[k++] = (char)c;
+                    else if (c < 0x800)
+                    {
+                        txt[k++] = (char)(0xc0 | (c >> 6));
+                        txt[k++] = (char)(0x80 | (c & 0x3f));
+                    }
+                    else
+                    {
+                        txt[k++] = (char)(0xe0 | (c >> 12));
+                        txt[k++] = (char)(0x80 | ((c >> 6) & 0x3f));
+                        txt[k++] = (char)(0x80 | (c & 0x3f));
+                    }
+                }
+                txt[k] = 0;
                 if (cls[0] || txt[0])
                     dprintf( 2, "[win-name] #%u hwnd=%p class='%s' text=\"%s\" rev=ml853\n", n, hwnd, cls, txt );
             }

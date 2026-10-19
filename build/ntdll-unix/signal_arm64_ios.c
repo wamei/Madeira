@@ -12441,11 +12441,13 @@ static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *
      * shows which host instruction sees which value. MADEIRA_SUBFLOOR_TRACE_RIP=<hex
      * guest block entry> and/or MADEIRA_SUBFLOOR_TRACE_ADDR=<hex guest address>
      * turn it on (State.rip is not refreshed on linked branches, so the address is
-     * the dependable filter); 128 lines at most. */
+     * the dependable filter); one line per distinct host PC, 128 at most, so a
+     * hot loop cannot use the budget up before the interesting block runs. */
     {
         static int trace_init;
         static uint64_t trace_rip, trace_addr;
         static unsigned trace_n;
+        static uint64_t trace_pcs[128];
         if (!trace_init)
         {
             const char *e = getenv( "MADEIRA_SUBFLOOR_TRACE_RIP" );
@@ -12462,14 +12464,18 @@ static int ios_subfloor_service( ucontext_t *ctx, void *fault_addr, const char *
                 (mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(x28 + 0x18), 8,
                                          (mach_vm_address_t)&grip, &g ) != KERN_SUCCESS || g != 8))
                 grip = 0;
-            if ((trace_rip && grip == trace_rip) || (trace_addr && addr == trace_addr))
+            unsigned seen_i;
+            for (seen_i = 0; seen_i < trace_n; seen_i++)
+                if (trace_pcs[seen_i] == (uint64_t)PC_sig(ctx)) break;
+            if (seen_i == trace_n &&
+                ((trace_rip && grip == trace_rip) || (trace_addr && addr == trace_addr)))
             {
                 uint32_t words[7] = { 0 };
                 const int rt = insn & 0x1F, rn = (insn >> 5) & 0x1F;
                 g = 0;
                 mach_vm_read_overwrite( mach_task_self(), (mach_vm_address_t)(PC_sig(ctx) - 12), sizeof(words),
                                         (mach_vm_address_t)words, &g );
-                trace_n++;
+                trace_pcs[trace_n++] = (uint64_t)PC_sig(ctx);
                 dprintf( 2, "[subfloor-rip] #%u block=%#llx guest %#llx (%u bytes) pc=%#llx insn=%08x "
                          "rt=x%d=%#llx rn=x%d=%#llx | host %08x %08x %08x [%08x] %08x %08x %08x\n",
                          trace_n, (unsigned long long)grip, (unsigned long long)addr, bytes,

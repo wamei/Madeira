@@ -139,8 +139,7 @@ static void **pe_counterpart(HMODULE dxgi, void **slot, void *orig)
         }
         p = stop;
     }
-    dcomp_log("[dcomp] PE vtable entry for pool slot %p: %u candidate(s), %p
-", slot, n, found);
+    dcomp_log("[dcomp] PE vtable entry for pool slot %p: %u candidate(s), %p\n", slot, n, found);
     return n == 1 ? found : NULL;
 }
 
@@ -156,32 +155,27 @@ static void patch_factory(void)
     void **slot, **pe;
     DWORD old;
 
-    if (!dxgi) { dcomp_log("[dcomp] dxgi.dll not loaded: composition swap chains stay unsupported
-"); return; }
+    if (!dxgi) { dcomp_log("[dcomp] dxgi.dll not loaded: composition swap chains stay unsupported\n"); return; }
     create = (create_fn)(void *)GetProcAddress(dxgi, "CreateDXGIFactory1");
     if (!create || FAILED(create(&IID_IDXGIFactory2, (void **)&factory)) || !factory) {
-        dcomp_log("[dcomp] no IDXGIFactory2: composition swap chains stay unsupported
-");
+        dcomp_log("[dcomp] no IDXGIFactory2: composition swap chains stay unsupported\n");
         return;
     }
     slot = (void **)&factory->lpVtbl->CreateSwapChainForComposition;
     if (*slot != (void *)composition_swap_chain) {
         void *orig = *slot;
         if (!(pe = pe_counterpart(dxgi, slot, orig))) {
-            dcomp_log("[dcomp] DXGI factory vtable entry not found in dxgi.dll's image
-");
+            dcomp_log("[dcomp] DXGI factory vtable entry not found in dxgi.dll's image\n");
         } else if (VirtualProtect(pe, sizeof *pe, PAGE_READWRITE, &old)) {
             orig_composition = (comp_fn)orig;
             *pe = (void *)composition_swap_chain;
             VirtualProtect(pe, sizeof *pe, old, &old);   /* copies the image into the pool copy */
             dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains "
-                      "(dxgi %p vtbl %p slot %p, PE %p: %p -> %p, slot reads %p)
-",
+                      "(dxgi %p vtbl %p slot %p, PE %p: %p -> %p, slot reads %p)\n",
                       dxgi, factory->lpVtbl, slot, pe, orig, (void *)composition_swap_chain,
                       *(void *volatile *)slot);
         } else {
-            dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)
-", GetLastError());
+            dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)\n", GetLastError());
         }
     }
     IDXGIFactory2_Release(factory);

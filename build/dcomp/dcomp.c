@@ -83,6 +83,7 @@ static HRESULT STDMETHODCALLTYPE composition_swap_chain(IDXGIFactory2 *factory, 
     DXGI_SWAP_CHAIN_DESC1 d;
     HRESULT hr;
 
+    dcomp_log("[dcomp] CreateSwapChainForComposition factory %p device %p desc %p\n", factory, device, desc);
     if (!desc || !swap_chain) return DXGI_ERROR_INVALID_CALL;
     EnumWindows(pick_window, (LPARAM)&p);
     if (!p.best) p.best = GetForegroundWindow();
@@ -101,6 +102,43 @@ static HRESULT STDMETHODCALLTYPE composition_swap_chain(IDXGIFactory2 *factory, 
               desc->Width, desc->Height, desc->Format, desc->BufferCount, desc->AlphaMode, p.best,
               p.same_thread ? "this" : "another", (unsigned long)hr);
     return hr;
+}
+
+/* Any other pointer in dxgi.dll's image to the original method (another
+ * vtable of the same class) is pointed at composition_swap_chain too, and
+ * each one is logged, so a factory whose calls still miss the hook shows
+ * where its vtable is not. */
+static void patch_copies(HMODULE dxgi, void *orig)
+{
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)dxgi;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)dxgi + dos->e_lfanew);
+    char *p = (char *)dxgi, *end = p + nt->OptionalHeader.SizeOfImage;
+    unsigned found = 0;
+
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        char *q, *stop;
+        if (!VirtualQuery(p, &mbi, sizeof mbi) || !mbi.RegionSize) break;
+        stop = (char *)mbi.BaseAddress + mbi.RegionSize;
+        if (stop > end) stop = end;
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
+            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
+                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+            for (q = (char *)(((ULONG_PTR)p + 7) & ~(ULONG_PTR)7); q + sizeof(void *) <= stop; q += sizeof(void *)) {
+                DWORD old;
+                if (*(void **)q != orig) continue;
+                found++;
+                if (VirtualProtect(q, sizeof(void *), PAGE_READWRITE, &old)) {
+                    *(void **)q = (void *)composition_swap_chain;
+                    VirtualProtect(q, sizeof(void *), old, &old);
+                }
+                dcomp_log("[dcomp] dxgi.dll +0x%lx held the original entry: now %p\n",
+                          (unsigned long)(q - (char *)dxgi), *(void *volatile *)q);
+            }
+        }
+        p = stop;
+    }
+    dcomp_log("[dcomp] %u more pointer(s) to the original entry in dxgi.dll\n", found);
 }
 
 /* Points the factory vtable's CreateSwapChainForComposition at
@@ -124,16 +162,23 @@ static void patch_factory(void)
     slot = (void **)&factory->lpVtbl->CreateSwapChainForComposition;
     if (*slot != (void *)composition_swap_chain) {
         if (VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) {
+            MEMORY_BASIC_INFORMATION mbi = {0};
             orig_composition = (comp_fn)*slot;
             *slot = (void *)composition_swap_chain;
             VirtualProtect(slot, sizeof *slot, old, &old);
             FlushInstructionCache(GetCurrentProcess(), slot, sizeof *slot);
-            dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains\n");
+            VirtualQuery(slot, &mbi, sizeof mbi);
+            dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains "
+                      "(dxgi %p factory %p vtbl %p slot %p: %p -> %p, reads %p; region %p+0x%lx prot 0x%lx was 0x%lx)\n",
+                      dxgi, factory, factory->lpVtbl, slot, orig_composition, (void *)composition_swap_chain,
+                      *(void *volatile *)slot, mbi.BaseAddress, (unsigned long)mbi.RegionSize,
+                      (unsigned long)mbi.Protect, (unsigned long)old);
         } else {
             dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)\n", GetLastError());
         }
     }
     IDXGIFactory2_Release(factory);
+    if (orig_composition) patch_copies(dxgi, (void *)orig_composition);
 }
 
 /* ------------------------------------------------- DirectComposition objects

@@ -3239,6 +3239,56 @@ static void ios_guest_path_hex_dump( const void *frame, uint64_t fault_rip )
         snprintf( tag, sizeof(tag), "edge#%u", i );
         ios_guest_hex_dump( tag, target, end + 16 );
     }
+    /* Older calls too: the function a call entered may be the one that
+     * returned the bad value (Dark Souls Remastered: a lookup returning null,
+     * three exits before the fault). 512 bytes from each older call target. */
+    for (i = 3; i < 8 && i < history.serial; i++)
+    {
+        unsigned slot = (unsigned)((history.serial - 1 - i) & 7);
+        if (history.edges[slot].hint != 1) continue;
+        snprintf( tag, sizeof(tag), "call#%u", i );
+        ios_guest_hex_dump( tag, history.edges[slot].target, history.edges[slot].target + 512 );
+    }
+}
+
+/* madeira-bcd: MADEIRA_GUEST_HEX_AT = a comma-separated list of guest memory
+ * to dump with the branch history: "addr:len" dumps len bytes at addr (hex),
+ * "*addr:len" dumps len bytes at the pointer stored at addr. For following a
+ * bad value back without a rebuild for every address. */
+static void ios_guest_hex_at( void )
+{
+    const char *list = getenv( "MADEIRA_GUEST_HEX_AT" );
+    char tag[32];
+
+    while (list && *list)
+    {
+        int deref = *list == '*';
+        char *end;
+        unsigned long long addr = strtoull( list + deref, &end, 16 ), len = 64;
+        if (end == list + deref) break;
+        if (*end == ':') len = strtoull( end + 1, &end, 16 );
+        if (deref)
+        {
+            uint64_t value = 0;
+            mach_vm_size_t got = 0;
+            if (mach_vm_read_overwrite( mach_task_self(), addr, sizeof(value), (mach_vm_address_t)&value, &got )
+                    != KERN_SUCCESS || got != sizeof(value))
+                dprintf( 2, "[guest-hex] *%#llx unreadable\n", addr );
+            else
+            {
+                dprintf( 2, "[guest-hex] *%#llx = %#llx\n", addr, (unsigned long long)value );
+                snprintf( tag, sizeof(tag), "*%llx", addr );
+                if (value) ios_guest_hex_dump( tag, value, value + (len ? len : 64) );
+            }
+        }
+        else
+        {
+            snprintf( tag, sizeof(tag), "at-%llx", addr );
+            ios_guest_hex_dump( tag, addr, addr + (len ? len : 64) );
+        }
+        while (*end && *end != ',') end++;
+        list = *end ? end + 1 : end;
+    }
 }
 
 static void ios_guest_branch_history_dump( const void *frame, uint64_t fault_rip, void *owner )
@@ -3287,6 +3337,7 @@ void ios_guest_branch_history_dump_frame( const void *frame, uint64_t fault_rip 
     TEB *teb = NtCurrentTeb();
     ios_guest_branch_history_dump( frame, fault_rip, teb ? teb->Peb : NULL );
     ios_guest_path_hex_dump( frame, fault_rip );
+    ios_guest_hex_at();
 }
 
 static int ios_dump_guest_instruction( HANDLE handle, LONG exit_code, uint64_t rip, void *owner )

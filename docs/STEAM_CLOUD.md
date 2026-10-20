@@ -67,7 +67,12 @@ file is written whole.
    siblings are under the Windows user folder: the profile the prefix's
    registry names (ProfileList's `ProfileImagePath`, where Wine points
    `%USERPROFILE%` and so the games; the template's is `C:\users\mythic`,
-   not the unix user `mobile`), else the one named after `$USER`. A path
+   not the unix user `mobile`), else the one named after `$USER`. Per game,
+   the `$USER` folder wins when the game's own top folder under its save
+   roots (where it also keeps logs and config) holds more files there: a game
+   Valve's client starts in a Madeira Dock session gets its environment from
+   the account name, so The Adventures of Elliot writes under
+   `C:\users\mobile` while Tales of Graces f Remastered uses `mythic`. A path
    with no placeholder is under Steam's
    `userdata/<account>/<app>/remote`. Names are matched without regard to
    case. A path that would leave its folder is refused.

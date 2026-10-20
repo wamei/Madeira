@@ -3252,40 +3252,44 @@ static void ios_guest_path_hex_dump( const void *frame, uint64_t fault_rip )
 }
 
 /* madeira-bcd: MADEIRA_GUEST_HEX_AT = a comma-separated list of guest memory
- * to dump with the branch history: "addr:len" dumps len bytes at addr (hex),
- * "*addr:len" dumps len bytes at the pointer stored at addr. For following a
- * bad value back without a rebuild for every address. */
+ * to dump with the branch history, all numbers hex: "addr:len" dumps len bytes
+ * at addr; "*addr:len" dumps len bytes at the pointer stored at addr; and
+ * "addr>off>off...:len" follows pointers, each ">off" reading the pointer at
+ * the current address and adding off (Dark Souls Remastered: the array of a
+ * global object, "141cb5420>8>0:290"). For following a bad value back without
+ * a rebuild for every address. */
 static void ios_guest_hex_at( void )
 {
     const char *list = getenv( "MADEIRA_GUEST_HEX_AT" );
-    char tag[32];
+    char tag[48];
 
     while (list && *list)
     {
-        int deref = *list == '*';
+        int deref = *list == '*', ok = 1;
         char *end;
         unsigned long long addr = strtoull( list + deref, &end, 16 ), len = 64;
         if (end == list + deref) break;
-        if (*end == ':') len = strtoull( end + 1, &end, 16 );
-        if (deref)
+        snprintf( tag, sizeof(tag), "%s%llx", deref ? "*" : "at-", addr );
+        while (ok && (deref || *end == '>'))
         {
+            unsigned long long off = 0;
             uint64_t value = 0;
             mach_vm_size_t got = 0;
+            if (!deref) off = strtoull( end + 1, &end, 16 );
+            deref = 0;
             if (mach_vm_read_overwrite( mach_task_self(), addr, sizeof(value), (mach_vm_address_t)&value, &got )
                     != KERN_SUCCESS || got != sizeof(value))
-                dprintf( 2, "[guest-hex] *%#llx unreadable\n", addr );
-            else
             {
-                dprintf( 2, "[guest-hex] *%#llx = %#llx\n", addr, (unsigned long long)value );
-                snprintf( tag, sizeof(tag), "*%llx", addr );
-                if (value) ios_guest_hex_dump( tag, value, value + (len ? len : 64) );
+                dprintf( 2, "[guest-hex] %s: pointer at %#llx unreadable\n", tag, addr );
+                ok = 0;
+                break;
             }
+            dprintf( 2, "[guest-hex] %s: [%#llx] = %#llx (+%#llx)\n", tag, addr, (unsigned long long)value, off );
+            addr = value + off;
+            if (!value) ok = 0;
         }
-        else
-        {
-            snprintf( tag, sizeof(tag), "at-%llx", addr );
-            ios_guest_hex_dump( tag, addr, addr + (len ? len : 64) );
-        }
+        if (*end == ':') len = strtoull( end + 1, &end, 16 );
+        if (ok) ios_guest_hex_dump( tag, addr, addr + (len ? len : 64) );
         while (*end && *end != ',') end++;
         list = *end ? end + 1 : end;
     }

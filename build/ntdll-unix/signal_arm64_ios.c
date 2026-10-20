@@ -10044,6 +10044,16 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                     int i, plausible = 0;
 
                     ERR("  [guest-state] x28=%p rip=%p\n", (void*)state, (void*)cs[0]);
+                    /* madeira-bcd: a branch to address 0 leaves no guest RIP to go by
+                     * (Slay the Spire 2: pc=0 from a JIT call, then a VEH that wrecked
+                     * the context and an exit code of garbage). The recorder's last
+                     * exits (MADEIRA_FEX_BRANCH_HISTORY) name the guest code that got
+                     * there, before exception dispatch runs more guest code over them. */
+                    if (!PC_sig(context))
+                    {
+                        extern void ios_guest_branch_history_dump_frame( const void *frame, uint64_t fault_rip );
+                        ios_guest_branch_history_dump_frame( (const void *)(uintptr_t)state, cs[0] );
+                    }
                     /* madeira-bcd: name the image section the guest RIP is in, and
                      * Wine's protection of its page. A NoExec trap (FEX's deliberate
                      * load from 0) inside an image means the emulator does not know

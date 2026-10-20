@@ -1300,6 +1300,30 @@ void ios_dump_guest_callers( const char *tag, unsigned long long x28 )
 }
 
 
+/* madeira-bcd cross-alias: bytes a load/store instruction touches, 0 when not
+ * one this knows. Load/store register, every addressing form and the atomics
+ * (bits 29:27 = 111, 25 = 0): 1 << size, or 16 for a SIMD Q (size 00, opc<1>);
+ * STLUR family (bits 29:24 = 011001) and the exclusives / ordered
+ * (001000): 1 << size; pairs (bits 29:27 = 101, 25 = 0): W 8, X and STGP 16,
+ * SIMD S/D/Q 8/16/32. */
+static unsigned ios_ldst_width( uint32_t insn )
+{
+    const unsigned size = insn >> 30;
+    if ((insn & 0x3a000000) == 0x38000000)
+    {
+        if ((insn & 0x04000000) && (insn & 0x00800000)) return size ? 0 : 16;
+        return 1u << size;
+    }
+    if ((insn & 0x3f000000) == 0x19000000 || (insn & 0x3f000000) == 0x08000000)
+        return 1u << size;
+    if ((insn & 0x3a000000) == 0x28000000)
+    {
+        if (insn & 0x04000000) return size == 3 ? 0 : 8u << size;
+        return size == 0 ? 8 : size == 3 ? 0 : 16;
+    }
+    return 0;
+}
+
 /* Signal-safe 32/64-bit CAS core, shared semantics with the BSD alias path.
  * Caller establishes full alias coverage. FP/LR encodings deliberately
  * decline: Darwin's __x array contains only x0..x28. No Wine logging here. */
@@ -3354,6 +3378,52 @@ static void *ios_mach_exception_thread( void *arg )
                 {
                     uint32_t insn; ios_fault_read_insn( (uint64_t)(uintptr_t)fault_pc, &insn );  /* ml982 */
                     int emulated = 0;
+                    /* madeira-bcd cross-alias: each anon RWX commit is its own pool
+                     * alias, so the RW view of the next 16 KB page need not follow
+                     * this one's. A store that runs past the page end was written
+                     * whole at rw_addr: its tail landed past this alias, in whatever
+                     * the pool holds there, and the next page never got it. A .NET
+                     * JIT `mov rax, imm64` emitted across two commits lost the top
+                     * five bytes of its immediate that way (Slay the Spire 2,
+                     * Godot.Label..cctor reading 0x801c00). Such a store is now
+                     * emulated into xbuf, which holds the current bytes of both
+                     * pages, and the bytes it changed are written through each
+                     * page's own alias. The first page faults first (both views are
+                     * read-only), so fault_addr is where the store starts.
+                     * A store whose next page has no alias is refused. */
+                    uint8_t xbuf[32], xorig[32];
+                    uintptr_t x_rw0 = 0, x_rw1 = 0, x_next = 0;
+                    unsigned x_n0 = 0, x_len = 0;
+                    int x_refuse = 0;
+                    if (!in_jit)
+                    {
+                        const unsigned w = ios_ldst_width( insn );
+                        const unsigned off = (unsigned)(fault_addr & 0x3fff);
+                        if (w && w <= sizeof(xbuf) && off + w > 0x4000)
+                        {
+                            x_next = ((uintptr_t)fault_addr | 0x3fff) + 1;
+                            x_rw1 = ios_jit_anon_alias_lookup( x_next );
+                            if (!x_rw1) x_refuse = 1;
+                            else if (x_rw1 != rw_addr + (x_next - (uintptr_t)fault_addr))
+                            {
+                                x_rw0 = rw_addr; x_n0 = 0x4000 - off; x_len = w;
+                                memcpy( xbuf, (void *)x_rw0, x_n0 );
+                                memcpy( xbuf + x_n0, (void *)x_rw1, w - x_n0 );
+                                memcpy( xorig, xbuf, w );
+                                rw_addr = (uintptr_t)xbuf;
+                            }
+                        }
+                        if (x_refuse || x_len)
+                        {
+                            static int xalias_n;
+                            if (xalias_n < 16)
+                                dprintf(STDERR_FILENO,
+                                    "[xalias] #%d insn=0x%08x pc=0x%llx addr=0x%llx width=%u next=0x%llx %s\n",
+                                    ++xalias_n, insn, (unsigned long long)fault_pc,
+                                    (unsigned long long)fault_addr, w, (unsigned long long)x_next,
+                                    x_refuse ? "REFUSED: next page has no alias" : "split across two aliases");
+                        }
+                    }
                     /* STP (SIMD&FP, signed offset, 128-bit Q): 10 101 1 1 0 0 0 imm7 Rt2 Rn Rt
                      *   pattern bits 31-22: 10 1011 1000  → top10 = 0x2B8 (= bits 31..22)
                      *   So mask 0xFFC00000 = top10. Match 0x2B8 << 22 = 0xAE000000? Hmm.
@@ -3393,7 +3463,8 @@ static void *ios_mach_exception_thread( void *arg )
                      *
                      * STP Q is not architecturally one atomic 32-byte transaction, so two
                      * 16-byte copies are correct. Rn==31 is SP, never __x[31]. */
-                    if (have_neon && (insn & 0xFE400000) == 0xAC000000)
+                    if (x_refuse) { }   /* cross-alias: no alias for the rest of the store */
+                    else if (have_neon && (insn & 0xFE400000) == 0xAC000000)
                     {
                         const int mode = (insn >> 23) & 0x3; /* 0 stnp, 1 post, 2 offset, 3 pre */
                         const int rt   = insn & 0x1f;
@@ -3408,7 +3479,7 @@ static void *ios_mach_exception_thread( void *arg )
                         uintptr_t rw_end = in_jit ? ((in_low && !ios_jit_low_contains( (uintptr_t)fault_addr + 31 ))
                                                      ? 0 : (uintptr_t)(rw + ((fault_addr + 31) - rx)))
                                                   : (uintptr_t)ios_jit_anon_alias_lookup( fault_addr + 31 );
-                        if (!rw_end || rw_end != (uintptr_t)rw_addr + 31)
+                        if (!x_len && (!rw_end || rw_end != (uintptr_t)rw_addr + 31))   /* xbuf covers both */
                         {
                             static int stp_span_n;
                             if (stp_span_n < 4)
@@ -4144,6 +4215,16 @@ static void *ios_mach_exception_thread( void *arg )
                                 "rw_addr=0x%llx — alias OK, ADD THIS ENCODING to the case-4 emulator\n",
                                 ++undecoded_n, insn, (unsigned long long)fault_pc,
                                 (unsigned long long)fault_addr, (unsigned long long)rw_addr);
+                    }
+                    if (emulated && x_len)
+                    {
+                        /* cross-alias: write back what the store changed in xbuf */
+                        extern void ios_jit_anon_alias_note_write( unsigned long long );
+                        unsigned i;
+                        for (i = 0; i < x_len; i++)
+                            if (xbuf[i] != xorig[i])
+                                *(volatile uint8_t *)(i < x_n0 ? x_rw0 + i : x_rw1 + (i - x_n0)) = xbuf[i];
+                        ios_jit_anon_alias_note_write( (unsigned long long)x_next );
                     }
                     if (emulated)
                     {

@@ -104,41 +104,44 @@ static HRESULT STDMETHODCALLTYPE composition_swap_chain(IDXGIFactory2 *factory, 
     return hr;
 }
 
-/* Any other pointer in dxgi.dll's image to the original method (another
- * vtable of the same class) is pointed at composition_swap_chain too, and
- * each one is logged, so a factory whose calls still miss the hook shows
- * where its vtable is not. */
-static void patch_copies(HMODULE dxgi, void *orig)
+/* Madeira runs a PE image from a copy in its JIT pool, and the vtables the
+ * code uses are the copy's: the factory's vtable pointer is a pool address.
+ * NtProtectVirtualMemory on an image region copies the PE bytes into the
+ * pool copy when it restores the protection, so a write to the copy is undone
+ * and the patch belongs in the PE image, where the loader's own import-table
+ * writes go. The PE vtable entry is found by its content: with the copy at
+ * a fixed distance D from the image, the entry at slot - D holds orig - D.
+ * Returns NULL when no single address of the image fits. */
+static void **pe_counterpart(HMODULE dxgi, void **slot, void *orig)
 {
     const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)dxgi;
     const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)dxgi + dos->e_lfanew);
     char *p = (char *)dxgi, *end = p + nt->OptionalHeader.SizeOfImage;
-    unsigned found = 0;
+    void **found = NULL;
+    unsigned n = 0;
 
+    if ((char *)slot >= p && (char *)slot < end) return slot;   /* no copy: the image itself */
     while (p < end) {
         MEMORY_BASIC_INFORMATION mbi;
         char *q, *stop;
         if (!VirtualQuery(p, &mbi, sizeof mbi) || !mbi.RegionSize) break;
         stop = (char *)mbi.BaseAddress + mbi.RegionSize;
         if (stop > end) stop = end;
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) &&
-            (mbi.Protect & (PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READ |
-                            PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) {
+        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
             for (q = (char *)(((ULONG_PTR)p + 7) & ~(ULONG_PTR)7); q + sizeof(void *) <= stop; q += sizeof(void *)) {
-                DWORD old;
-                if (*(void **)q != orig) continue;
-                found++;
-                if (VirtualProtect(q, sizeof(void *), PAGE_READWRITE, &old)) {
-                    *(void **)q = (void *)composition_swap_chain;
-                    VirtualProtect(q, sizeof(void *), old, &old);
-                }
-                dcomp_log("[dcomp] dxgi.dll +0x%lx held the original entry: now %p\n",
-                          (unsigned long)(q - (char *)dxgi), *(void *volatile *)q);
+                ULONG_PTR d = (ULONG_PTR)slot - (ULONG_PTR)q;
+                if (*(ULONG_PTR *)q != (ULONG_PTR)orig - d) continue;
+                /* the entry before must fit the same distance too */
+                if (q - sizeof(void *) < (char *)dxgi ||
+                    *(ULONG_PTR *)(q - sizeof(void *)) != (ULONG_PTR)slot[-1] - d) continue;
+                if (!n++) found = (void **)q;
             }
         }
         p = stop;
     }
-    dcomp_log("[dcomp] %u more pointer(s) to the original entry in dxgi.dll\n", found);
+    dcomp_log("[dcomp] PE vtable entry for pool slot %p: %u candidate(s), %p
+", slot, n, found);
+    return n == 1 ? found : NULL;
 }
 
 /* Points the factory vtable's CreateSwapChainForComposition at
@@ -150,35 +153,38 @@ static void patch_factory(void)
     HMODULE dxgi = GetModuleHandleA("dxgi.dll");
     create_fn create;
     IDXGIFactory2 *factory = NULL;
-    void **slot;
+    void **slot, **pe;
     DWORD old;
 
-    if (!dxgi) { dcomp_log("[dcomp] dxgi.dll not loaded: composition swap chains stay unsupported\n"); return; }
+    if (!dxgi) { dcomp_log("[dcomp] dxgi.dll not loaded: composition swap chains stay unsupported
+"); return; }
     create = (create_fn)(void *)GetProcAddress(dxgi, "CreateDXGIFactory1");
     if (!create || FAILED(create(&IID_IDXGIFactory2, (void **)&factory)) || !factory) {
-        dcomp_log("[dcomp] no IDXGIFactory2: composition swap chains stay unsupported\n");
+        dcomp_log("[dcomp] no IDXGIFactory2: composition swap chains stay unsupported
+");
         return;
     }
     slot = (void **)&factory->lpVtbl->CreateSwapChainForComposition;
     if (*slot != (void *)composition_swap_chain) {
-        if (VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) {
-            MEMORY_BASIC_INFORMATION mbi = {0};
-            orig_composition = (comp_fn)*slot;
-            *slot = (void *)composition_swap_chain;
-            VirtualProtect(slot, sizeof *slot, old, &old);
-            FlushInstructionCache(GetCurrentProcess(), slot, sizeof *slot);
-            VirtualQuery(slot, &mbi, sizeof mbi);
+        void *orig = *slot;
+        if (!(pe = pe_counterpart(dxgi, slot, orig))) {
+            dcomp_log("[dcomp] DXGI factory vtable entry not found in dxgi.dll's image
+");
+        } else if (VirtualProtect(pe, sizeof *pe, PAGE_READWRITE, &old)) {
+            orig_composition = (comp_fn)orig;
+            *pe = (void *)composition_swap_chain;
+            VirtualProtect(pe, sizeof *pe, old, &old);   /* copies the image into the pool copy */
             dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains "
-                      "(dxgi %p factory %p vtbl %p slot %p: %p -> %p, reads %p; region %p+0x%lx prot 0x%lx was 0x%lx)\n",
-                      dxgi, factory, factory->lpVtbl, slot, orig_composition, (void *)composition_swap_chain,
-                      *(void *volatile *)slot, mbi.BaseAddress, (unsigned long)mbi.RegionSize,
-                      (unsigned long)mbi.Protect, (unsigned long)old);
+                      "(dxgi %p vtbl %p slot %p, PE %p: %p -> %p, slot reads %p)
+",
+                      dxgi, factory->lpVtbl, slot, pe, orig, (void *)composition_swap_chain,
+                      *(void *volatile *)slot);
         } else {
-            dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)\n", GetLastError());
+            dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)
+", GetLastError());
         }
     }
     IDXGIFactory2_Release(factory);
-    if (orig_composition) patch_copies(dxgi, (void *)orig_composition);
 }
 
 /* ------------------------------------------------- DirectComposition objects

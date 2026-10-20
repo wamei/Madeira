@@ -125,6 +125,61 @@ struct SteamCloudPaths: Sendable {
         return (users.appendingPathComponent(newest, isDirectory: true), own.count, "newest")
     }
 
+    /// madeira-bcd: the user folder ONE game writes to. The prefix-wide choice
+    /// above is right for a game started with the session's own environment
+    /// (Tales of Graces f Remastered: C:\users\mythic), but a game Valve's
+    /// client starts in a Madeira Dock session gets an environment block built
+    /// from the account name (userenv's CreateEnvironmentBlock: profiles folder
+    /// + "mobile"), so The Adventures of Elliot kept its saves, logs and config
+    /// under C:\users\mobile while the cloud's saves went to mythic and the
+    /// game offered no Continue. For each candidate (the prefix-wide choice,
+    /// then the $USER folder) this counts the files in the game's own top
+    /// folder under its save roots -- the folder the game creates and fills
+    /// with logs and config besides the saves -- and keeps the one with more.
+    /// A tie, or no save root under the user folder, keeps the prefix-wide one.
+    static func userFolder(drive: URL, preferred: URL, saveFiles: [SteamAppInfo.SaveFile])
+        -> (url: URL, how: String) {
+        let users = drive.appendingPathComponent("users", isDirectory: true)
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: users.path)) ?? []
+        var candidates = [preferred]
+        if let user = getenv("USER").map({ String(cString: $0) }),
+           let match = names.first(where: { $0.caseInsensitiveCompare(user) == .orderedSame }) {
+            let url = users.appendingPathComponent(match, isDirectory: true)
+            if url.standardizedFileURL.path != preferred.standardizedFileURL.path { candidates.append(url) }
+        }
+        guard candidates.count > 1 else { return (preferred, "prefix") }
+        let subfolders = ["winmydocuments": "Documents", "winappdatalocal": "AppData/Local",
+                          "winappdatalocallow": "AppData/LocalLow", "winappdataroaming": "AppData/Roaming",
+                          "winsavedgames": "Saved Games"]
+        // The game's top folders: the first component of each save path under a user root.
+        var tops = Set<String>()
+        for save in saveFiles where save.platforms.isEmpty || save.platforms.contains("windows") {
+            guard let sub = subfolders[save.root.lowercased()],
+                  let first = save.path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").first,
+                  !first.contains("{"), first != ".", first != ".." else { continue }
+            tops.insert(sub + "/" + first)
+        }
+        guard !tops.isEmpty else { return (preferred, "prefix") }
+        func count(_ user: URL) -> Int {
+            var total = 0
+            for top in tops {
+                let folder = resolve(base: user, parts: top.split(separator: "/").map(String.init))
+                guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) else { continue }
+                for case _ as URL in walk {
+                    total += 1
+                    if total >= 2_000 { return total }
+                }
+            }
+            return total
+        }
+        var best = (url: preferred, files: count(preferred))
+        for url in candidates.dropFirst() {
+            let files = count(url)
+            if files > best.files { best = (url, files) }
+        }
+        return (best.url, best.url == preferred ? "prefix" : "game")
+    }
+
     /// The folder name under C:\users of the interactive user's profile in the
     /// prefix's system.reg (ProfileList\S-1-5-21-...\ProfileImagePath), or nil.
     static func profileName(prefix: URL) -> String? {

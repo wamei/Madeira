@@ -3280,6 +3280,15 @@ static void ios_guest_branch_history_dump( const void *frame, uint64_t fault_rip
     }
 }
 
+/* madeira-bcd: the recorder's exits for a FEX frame, from the fault path
+ * (signal_arm64_ios.c: a branch to address 0). */
+void ios_guest_branch_history_dump_frame( const void *frame, uint64_t fault_rip )
+{
+    TEB *teb = NtCurrentTeb();
+    ios_guest_branch_history_dump( frame, fault_rip, teb ? teb->Peb : NULL );
+    ios_guest_path_hex_dump( frame, fault_rip );
+}
+
 static int ios_dump_guest_instruction( HANDLE handle, LONG exit_code, uint64_t rip, void *owner )
 {
     extern int ios_jit_guest_code_window( uint64_t, uint64_t *, uint64_t *, size_t * );

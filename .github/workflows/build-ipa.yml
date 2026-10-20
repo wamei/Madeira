@@ -197,6 +197,12 @@ jobs:
           { "$T/llvm-readobj" --file-headers "$D" | grep -i 'ImageBase'; "$T/llvm-nm" -n -C "$D"; } \
             > "$GITHUB_WORKSPACE/fex-arm64ec-syms.log" 2>&1 || true
 
+      # dcomp.dll: composition swap chains presented through a window
+      # (build/dcomp/dcomp.c), in place of Wine's E_NOTIMPL stub.
+      - name: Build dcomp.dll
+        shell: bash
+        run: bash build/dcomp/build.sh
+
       # ------------------------------------------------------------------ Wine
       # Host tools (widl, wrc, winebuild...) for the cross-configured tree.
       - name: Restore native Wine tools

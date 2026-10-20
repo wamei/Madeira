@@ -125,61 +125,6 @@ struct SteamCloudPaths: Sendable {
         return (users.appendingPathComponent(newest, isDirectory: true), own.count, "newest")
     }
 
-    /// madeira-bcd: the user folder ONE game writes to. The prefix-wide choice
-    /// above is right for a game started with the session's own environment
-    /// (Tales of Graces f Remastered: C:\users\mythic), but a game Valve's
-    /// client starts in a Madeira Dock session gets an environment block built
-    /// from the account name (userenv's CreateEnvironmentBlock: profiles folder
-    /// + "mobile"), so The Adventures of Elliot kept its saves, logs and config
-    /// under C:\users\mobile while the cloud's saves went to mythic and the
-    /// game offered no Continue. For each candidate (the prefix-wide choice,
-    /// then the $USER folder) this counts the files in the game's own top
-    /// folder under its save roots -- the folder the game creates and fills
-    /// with logs and config besides the saves -- and keeps the one with more.
-    /// A tie, or no save root under the user folder, keeps the prefix-wide one.
-    static func userFolder(drive: URL, preferred: URL, saveFiles: [SteamAppInfo.SaveFile])
-        -> (url: URL, how: String) {
-        let users = drive.appendingPathComponent("users", isDirectory: true)
-        let names = (try? FileManager.default.contentsOfDirectory(atPath: users.path)) ?? []
-        var candidates = [preferred]
-        if let user = getenv("USER").map({ String(cString: $0) }),
-           let match = names.first(where: { $0.caseInsensitiveCompare(user) == .orderedSame }) {
-            let url = users.appendingPathComponent(match, isDirectory: true)
-            if url.standardizedFileURL.path != preferred.standardizedFileURL.path { candidates.append(url) }
-        }
-        guard candidates.count > 1 else { return (preferred, "prefix") }
-        let subfolders = ["winmydocuments": "Documents", "winappdatalocal": "AppData/Local",
-                          "winappdatalocallow": "AppData/LocalLow", "winappdataroaming": "AppData/Roaming",
-                          "winsavedgames": "Saved Games"]
-        // The game's top folders: the first component of each save path under a user root.
-        var tops = Set<String>()
-        for save in saveFiles where save.platforms.isEmpty || save.platforms.contains("windows") {
-            guard let sub = subfolders[save.root.lowercased()],
-                  let first = save.path.replacingOccurrences(of: "\\", with: "/").split(separator: "/").first,
-                  !first.contains("{"), first != ".", first != ".." else { continue }
-            tops.insert(sub + "/" + first)
-        }
-        guard !tops.isEmpty else { return (preferred, "prefix") }
-        func count(_ user: URL) -> Int {
-            var total = 0
-            for top in tops {
-                let folder = resolve(base: user, parts: top.split(separator: "/").map(String.init))
-                guard let walk = FileManager.default.enumerator(at: folder, includingPropertiesForKeys: nil) else { continue }
-                for case _ as URL in walk {
-                    total += 1
-                    if total >= 2_000 { return total }
-                }
-            }
-            return total
-        }
-        var best = (url: preferred, files: count(preferred))
-        for url in candidates.dropFirst() {
-            let files = count(url)
-            if files > best.files { best = (url, files) }
-        }
-        return (best.url, best.url == preferred ? "prefix" : "game")
-    }
-
     /// The folder name under C:\users of the interactive user's profile in the
     /// prefix's system.reg (ProfileList\S-1-5-21-...\ProfileImagePath), or nil.
     static func profileName(prefix: URL) -> String? {
@@ -280,6 +225,146 @@ struct SteamCloudPaths: Sendable {
             }
         }
         return url
+    }
+}
+
+// MARK: - One Windows profile per prefix
+
+/// madeira-bcd: the prefix template names its Windows profile C:\users\mythic
+/// (ProfileList's ProfileImagePath, Volatile Environment, shell folders), but
+/// Wine names the account after the unix user, "mobile" on a device. A game
+/// started with the session's environment then writes under mythic, while a
+/// game Valve's client starts in a Madeira Dock session gets an environment
+/// block built from the account name (userenv: profiles folder + "mobile") and
+/// writes under mobile: The Adventures of Elliot kept its saves under mobile
+/// while Steam Cloud put the cloud's saves under mythic. The profile is now the
+/// unix user's everywhere: the registry's paths are rewritten to it and the
+/// template profile's files are moved into it, once, before Wine starts (run
+/// from MadeiraApp.init; the wineserver rewrites the .reg files from memory, so
+/// it must not be running).
+///
+/// A file present in both folders keeps the newer copy; the other is moved to
+/// Files › Madeira › Profile Merge Backups. After such a collision the Steam
+/// Cloud record is dropped, so a save that now differs from the cloud is shown
+/// as a choice instead of being uploaded or downloaded unasked.
+enum ProfileUnification {
+    private static var ran = false
+
+    static func run() {
+        guard !ran else { return }
+        ran = true
+        let fm = FileManager.default
+        let prefix = MadeiraDock.prefix
+        let users = prefix.appendingPathComponent("drive_c/users", isDirectory: true)
+        guard let user = unixUser(), let old = SteamCloudPaths.profileName(prefix: prefix),
+              old.caseInsensitiveCompare(user) != .orderedSame else { return }
+
+        // The registry first: without it the moved files would sit where nothing
+        // looks. A .reg file that is present but cannot be rewritten stops here.
+        var rewritten = 0
+        for name in ["system.reg", "user.reg", "userdef.reg"] {
+            let url = prefix.appendingPathComponent(name)
+            guard fm.fileExists(atPath: url.path) else { continue }
+            guard let hits = rewrite(url, from: old, to: user) else {
+                LogStore.shared.log("[profile] could not rewrite \(name); the profile stays as it is", level: .error)
+                return
+            }
+            rewritten += hits
+        }
+
+        let source = users.appendingPathComponent(old, isDirectory: true)
+        let target = users.appendingPathComponent(user, isDirectory: true)
+        var moved = 0, collisions = 0
+        if fm.fileExists(atPath: source.path) {
+            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
+            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
+            let backup = prefix.deletingLastPathComponent()
+                .appendingPathComponent("Profile Merge Backups/\(stamp)", isDirectory: true)
+            merge(source, into: target, backup: backup, depth: 24, moved: &moved, collisions: &collisions)
+            if (try? fm.contentsOfDirectory(atPath: source.path))?.isEmpty == true { try? fm.removeItem(at: source) }
+        }
+        if collisions > 0 {
+            let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Madeira/steam-cloud-sync.json")
+            try? fm.removeItem(at: support)
+        }
+        LogStore.shared.log("[profile] one Windows profile: \(rewritten) registry path(s) now name the unix user's folder; "
+            + "\(moved) item(s) moved from the template profile, \(collisions) collision(s) kept newer"
+            + (collisions > 0 ? " (older copies in Files › Madeira › Profile Merge Backups; Steam Cloud record reset)" : ""),
+            level: .success)
+    }
+
+    /// The account name Wine uses (ntdll's set_home_dir): $USER, else the passwd name.
+    private static func unixUser() -> String? {
+        var name = getenv("USER").map { String(cString: $0) } ?? ""
+        if name.isEmpty, let entry = getpwuid(getuid()) { name = String(cString: entry.pointee.pw_name) }
+        if let slash = name.lastIndex(where: { $0 == "/" || $0 == "\\" }) { name = String(name[name.index(after: slash)...]) }
+        return name.isEmpty || name == "." || name == ".." ? nil : name
+    }
+
+    /// `users\\<old>` followed by `\\` or `"` becomes `users\\<new>` (.reg text,
+    /// backslashes doubled), without regard to case. Written via a temporary file;
+    /// nil when the file cannot be read or written.
+    private static func rewrite(_ url: URL, from old: String, to new: String) -> Int? {
+        guard let size = (try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize, size <= 64 << 20,
+              let read = try? String(contentsOf: url, encoding: .utf8) else { return nil }
+        // Volatile Environment's USERNAME names the profile's user too.
+        let text = read.replacingOccurrences(of: #""USERNAME"=""# + old + "\"",
+                                             with: #""USERNAME"=""# + new + "\"", options: .caseInsensitive)
+        let needle = #"users\\"# + old
+        var out = "", hits = 0
+        var rest = text[...]
+        while let range = rest.range(of: needle, options: .caseInsensitive) {
+            let after = rest[range.upperBound...]
+            out += rest[..<range.lowerBound]
+            if after.hasPrefix(#"\\"#) || after.hasPrefix("\"") {
+                out += #"users\\"# + new
+                hits += 1
+            } else {
+                out += rest[range]
+            }
+            rest = after
+        }
+        guard hits > 0 || text != read else { return 0 }
+        out += rest
+        do { try out.write(to: url, atomically: true, encoding: .utf8) } catch { return nil }
+        return hits
+    }
+
+    /// Moves `source`'s contents into `target`. Where both have a file, the newer
+    /// stays in `target` and the other goes to `backup` (same relative path).
+    private static func merge(_ source: URL, into target: URL, backup: URL, depth: Int,
+                              moved: inout Int, collisions: inout Int) {
+        let fm = FileManager.default
+        guard depth > 0, let names = try? fm.contentsOfDirectory(atPath: source.path) else { return }
+        for name in names {
+            let from = source.appendingPathComponent(name), to = target.appendingPathComponent(name)
+            var fromDir: ObjCBool = false, toDir: ObjCBool = false
+            guard fm.fileExists(atPath: from.path, isDirectory: &fromDir) else { continue }
+            if !fm.fileExists(atPath: to.path, isDirectory: &toDir) {
+                if (try? fm.moveItem(at: from, to: to)) != nil { moved += 1 }
+                continue
+            }
+            if fromDir.boolValue && toDir.boolValue {
+                merge(from, into: to, backup: backup.appendingPathComponent(name, isDirectory: true), depth: depth - 1,
+                      moved: &moved, collisions: &collisions)
+                if (try? fm.contentsOfDirectory(atPath: from.path))?.isEmpty == true { try? fm.removeItem(at: from) }
+                continue
+            }
+            // Both exist and are not both folders: keep the newer in place.
+            collisions += 1
+            func date(_ url: URL) -> Date {
+                (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            }
+            try? fm.createDirectory(at: backup, withIntermediateDirectories: true)
+            let saved = backup.appendingPathComponent(name)
+            if date(from) > date(to) {
+                try? fm.moveItem(at: to, to: saved)
+                try? fm.moveItem(at: from, to: to)
+            } else {
+                try? fm.moveItem(at: from, to: saved)
+            }
+        }
     }
 }
 

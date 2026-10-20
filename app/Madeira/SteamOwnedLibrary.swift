@@ -554,13 +554,8 @@ final class SteamOwnedLibrary: ObservableObject {
         let steamID = session.steamID
         guard let info = try await fetcher.fetchAppInfo(appID: UInt32(appID)) else { return nil }
         let drive = Self.drive
-        let gameUser = SteamCloudPaths.userFolder(drive: drive, preferred: user.url, saveFiles: info.saveFiles)
-        if gameUser.how == "game" {
-            // No folder names: the log never carries user folder names.
-            SteamLog.event("[steam-cloud] app=\(appID) user folder: the game's own files are in the $USER folder, not the prefix-wide one; syncing there")
-        }
         let paths = SteamCloudPaths(
-            drive: drive, userFolder: gameUser.url,
+            drive: drive, userFolder: user.url,
             installFolder: drive.appendingPathComponent(game.library + "/common/" + game.installDir, isDirectory: true),
             remoteFolder: MadeiraDock.clientRoot.appendingPathComponent("userdata/\(steamID & 0xFFFF_FFFF)/\(appID)/remote", isDirectory: true),
             steamID: steamID, overrides: info.rootOverrides)

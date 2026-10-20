@@ -10129,8 +10129,13 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                      * (Slay the Spire 2: pc=0 from a JIT call, then a VEH that wrecked
                      * the context and an exit code of garbage). The recorder's last
                      * exits (MADEIRA_FEX_BRANCH_HISTORY) name the guest code that got
-                     * there, before exception dispatch runs more guest code over them. */
-                    if (!PC_sig(context))
+                     * there, before exception dispatch runs more guest code over them.
+                     * Also a read or write of the first 64 KB (a null pointer), the
+                     * first 4 times: Dark Souls Remastered's unhandled null read left,
+                     * at its termination, only the exits of the exception filter. */
+                    static int null_history_n;
+                    if (!PC_sig(context) ||
+                        ((uintptr_t)siginfo->si_addr < 0x10000 && null_history_n++ < 4))
                     {
                         extern void ios_guest_branch_history_dump_frame( const void *frame, uint64_t fault_rip );
                         ios_guest_branch_history_dump_frame( (const void *)(uintptr_t)state, cs[0] );

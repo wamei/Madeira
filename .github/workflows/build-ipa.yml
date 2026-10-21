@@ -523,6 +523,56 @@ jobs:
           path: app/Madeira/i386-windows
           key: i386-farm-v1-${{ steps.rev.outputs.wine }}-${{ steps.rev.outputs.dxmt }}-${{ hashFiles('build/wine-i386/build.sh') }}
 
+      # The PE ntdll is otherwise the prebuilt DLL committed under
+      # app/Madeira/arm64ec-windows; rebuild it from the pinned wine so
+      # loader changes (ucrtbase from system32, the TLS index synced into the
+      # JIT copy) ship in this IPA. Only the finished DLL is cached.
+      - name: Restore ARM64EC ntdll.dll
+        id: pentdll
+        uses: actions/cache/restore@v4
+        with:
+          path: app/Madeira/arm64ec-windows/ntdll.dll
+          key: arm64ec-ntdll-v1-${{ steps.rev.outputs.wine }}-${{ hashFiles('build/wine-pe/build-ntdll.sh') }}
+
+      - name: Build ARM64EC ntdll.dll
+        if: steps.pentdll.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          bash build/wine-pe/build-ntdll.sh > wine-pe-ntdll.log 2>&1 || { grep -E "error|Error" wine-pe-ntdll.log | head -40; tail -30 wine-pe-ntdll.log; exit 1; }
+          tail -3 wine-pe-ntdll.log
+
+      - name: Save ARM64EC ntdll.dll
+        if: steps.pentdll.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/Madeira/arm64ec-windows/ntdll.dll
+          key: arm64ec-ntdll-v1-${{ steps.rev.outputs.wine }}-${{ hashFiles('build/wine-pe/build-ntdll.sh') }}
+
+      # Desktop OpenGL for x64 games: Mesa's opengl32 on D3D12 (docs/BUILDING.md,
+      # "OpenGL"). Without it WineProcessBridge.m keeps Wine's stub. Every input
+      # is pinned in build/mesa-d3d12/build.sh, so the output is cached on it.
+      - name: Restore Mesa OpenGL
+        id: mesa
+        uses: actions/cache/restore@v4
+        with:
+          path: app/Madeira/x86_64-opengl
+          key: mesa-d3d12-v1-${{ hashFiles('build/mesa-d3d12/build.sh', 'build/mesa-d3d12/patches/**') }}
+
+      - name: Build Mesa OpenGL
+        if: steps.mesa.outputs.cache-hit != 'true'
+        shell: bash
+        run: |
+          BISON_DIR="$(brew --prefix bison)/bin" bash build/mesa-d3d12/build.sh > mesa-d3d12.log 2>&1 || { grep -E "error|Error" mesa-d3d12.log | head -40; tail -30 mesa-d3d12.log; exit 1; }
+          tail -5 mesa-d3d12.log
+          ls -l app/Madeira/x86_64-opengl
+
+      - name: Save Mesa OpenGL
+        if: steps.mesa.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: app/Madeira/x86_64-opengl
+          key: mesa-d3d12-v1-${{ hashFiles('build/mesa-d3d12/build.sh', 'build/mesa-d3d12/patches/**') }}
+
       # tools/fetch-vcruntime.md: Microsoft's DLLs, unmodified. 7-Zip only sees
       # the Burn bundle's stub, so cabextract/msiextract peel the containers and
       # each DLL is taken by its PE machine type (AMD64), not by its name.

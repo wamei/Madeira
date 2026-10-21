@@ -1345,15 +1345,31 @@ static uintptr_t ios_write_alias( uintptr_t addr )
  * while a guest page has cached translations. Let its normal exception
  * handler invalidate those translations and restore logical write access
  * before emulating the retried store. Native pool writes have no guest
- * protection record and must retain their existing path. */
+ * protection record and must retain their existing path.
+ *
+ * Opt-in (MADEIRA_ALIAS_GUEST_PROT=1, e.g. as a game's own env line for
+ * Stardew Valley). Off, a store into a page FEX has write-protected is
+ * completed through the alias as before willfaust/Madeira#211: Slay the
+ * Spire 2's .NET JIT stores into its RWX code buffer from a thread whose sp
+ * no TEB owns, so every store faulted three times before the delivery went
+ * through, and the game died at a garbage rip after ~11,000 of them. */
 static int ios_alias_write_is_trapped( uintptr_t addr )
 {
     extern void *ios_jit_rx_base_global;
     extern size_t ios_jit_pool_size_global;
     extern int ios_page_expected_prot( const void *addr );
+    static int enabled = -1;
     uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
     int prot;
 
+    if (enabled < 0)
+    {
+        const char *e = getenv( "MADEIRA_ALIAS_GUEST_PROT" );
+        enabled = e && e[0] == '1';
+        dprintf( 2, "[alias-protection] guest write protection on alias stores %s (MADEIRA_ALIAS_GUEST_PROT)\n",
+                 enabled ? "HONOURED" : "not honoured" );
+    }
+    if (!enabled) return 0;
     if (rx && addr >= rx && addr - rx < ios_jit_pool_size_global) return 0;
     prot = ios_page_expected_prot( (const void *)addr );
     return prot >= 0 && !(prot & PROT_WRITE);

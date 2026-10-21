@@ -30,6 +30,7 @@ code = r'''
 #include <assert.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -79,6 +80,8 @@ static uint32_t stp(unsigned wide, unsigned mode, int imm, unsigned rt, unsigned
 int main(void)
 {
     uintptr_t blocked = 0;
+    /* The guest-protection path is opt-in (MADEIRA_ALIAS_GUEST_PROT); test it on. */
+    setenv("MADEIRA_ALIAS_GUEST_PROT", "1", 1);
     size_t n = (size_t)sysconf(_SC_PAGESIZE);
     FILE *f = tmpfile();
     assert(f && !ftruncate(fileno(f), n));

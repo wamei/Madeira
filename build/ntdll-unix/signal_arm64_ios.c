@@ -1353,14 +1353,9 @@ static uintptr_t ios_write_alias( uintptr_t addr )
  * Spire 2's .NET JIT stores into its RWX code buffer from a thread whose sp
  * no TEB owns, so every store faulted three times before the delivery went
  * through, and the game died at a garbage rip after ~11,000 of them. */
-static int ios_alias_write_is_trapped( uintptr_t addr )
+static int ios_alias_guest_prot_enabled(void)
 {
-    extern void *ios_jit_rx_base_global;
-    extern size_t ios_jit_pool_size_global;
-    extern int ios_page_expected_prot( const void *addr );
     static int enabled = -1;
-    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
-    int prot;
 
     if (enabled < 0)
     {
@@ -1369,7 +1364,18 @@ static int ios_alias_write_is_trapped( uintptr_t addr )
         dprintf( 2, "[alias-protection] guest write protection on alias stores %s (MADEIRA_ALIAS_GUEST_PROT)\n",
                  enabled ? "HONOURED" : "not honoured" );
     }
-    if (!enabled) return 0;
+    return enabled;
+}
+
+static int ios_alias_write_is_trapped( uintptr_t addr )
+{
+    extern void *ios_jit_rx_base_global;
+    extern size_t ios_jit_pool_size_global;
+    extern int ios_page_expected_prot( const void *addr );
+    uintptr_t rx = (uintptr_t)ios_jit_rx_base_global;
+    int prot;
+
+    if (!ios_alias_guest_prot_enabled()) return 0;
     if (rx && addr >= rx && addr - rx < ios_jit_pool_size_global) return 0;
     prot = ios_page_expected_prot( (const void *)addr );
     return prot >= 0 && !(prot & PROT_WRITE);
@@ -13423,8 +13429,13 @@ static void bus_handler( int signal, siginfo_t *siginfo, void *sigcontext )
                      * alias is RX by design. In particular, let FEX see CAS
                      * writes so it invalidates translated code before patching
                      * the RW alias. Healing here skips that invalidation and
-                     * leaves CoreCLR repeatedly executing its old prestub. */
-                    int aliased = ios_write_alias( (uintptr_t)siginfo->si_addr ) != 0;
+                     * leaves CoreCLR repeatedly executing its old prestub.
+                     * Only with MADEIRA_ALIAS_GUEST_PROT=1: without the heal,
+                     * Slay the Spire 2's LDADDAL/CASAL into its anon RWX code
+                     * pages, which the Mach path does not emulate, fault for
+                     * ever (store-undecoded insn 0xb8f50106 / 0xc8e8ff40). */
+                    int aliased = ios_alias_guest_prot_enabled() &&
+                                  ios_write_alias( (uintptr_t)siginfo->si_addr ) != 0;
                     int stripped = (is_write && (want & PROT_WRITE) && !aliased &&
                                     host_prot >= 0 && !(host_prot & VM_PROT_WRITE));
                     ++wr_seen;

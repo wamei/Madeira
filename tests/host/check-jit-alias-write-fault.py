@@ -19,7 +19,7 @@ def function(signature):
     start = source.index(signature)
     return source[start:source.index('\n}', start) + 2] + '\n'
 
-start = source.index('                    int aliased = ios_write_alias(')
+start = source.index('                    int aliased = ios_alias_guest_prot_enabled() &&')
 end = source.index('                    ++wr_seen;', start)
 policy = source[start:end]
 assert 'ios_alias_store_pair( insn, fault_addr, gpr, &alias_fault, honor_guest_prot )' in source
@@ -58,6 +58,7 @@ uintptr_t ios_jit_anon_alias_lookup(uintptr_t addr)
 '''
 code += function('static uintptr_t ios_write_alias( uintptr_t addr )')
 code += function('static int ios_mach_emulate_casp(uint32_t insn, uintptr_t rw_addr, uint64_t gpr[29])')
+code += function('static int ios_alias_guest_prot_enabled(void)')
 code += function('static int ios_alias_write_is_trapped( uintptr_t addr )')
 code += function('static int ios_alias_write( uintptr_t addr, const void *source, size_t size, uintptr_t *blocked,\n                            int honor_guest_prot )')
 code += function('static int ios_alias_store_pair( uint32_t insn, uintptr_t addr, uint64_t gpr[32], uintptr_t *blocked,\n                                 int honor_guest_prot )')

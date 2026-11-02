@@ -83,7 +83,6 @@ static HRESULT STDMETHODCALLTYPE composition_swap_chain(IDXGIFactory2 *factory, 
     DXGI_SWAP_CHAIN_DESC1 d;
     HRESULT hr;
 
-    dcomp_log("[dcomp] CreateSwapChainForComposition factory %p device %p desc %p\n", factory, device, desc);
     if (!desc || !swap_chain) return DXGI_ERROR_INVALID_CALL;
     EnumWindows(pick_window, (LPARAM)&p);
     if (!p.best) p.best = GetForegroundWindow();
@@ -104,55 +103,51 @@ static HRESULT STDMETHODCALLTYPE composition_swap_chain(IDXGIFactory2 *factory, 
     return hr;
 }
 
-/* Madeira runs a PE image from a copy in its JIT pool, and the vtables the
- * code uses are the copy's: the factory's vtable pointer is a pool address.
- * NtProtectVirtualMemory on an image region copies the PE bytes into the
- * pool copy when it restores the protection, so a write to the copy is undone
- * and the patch belongs in the PE image, where the loader's own import-table
- * writes go. The PE vtable entry is found by its content: with the copy at
- * a fixed distance D from the image, the entry at slot - D holds orig - D.
- * Returns NULL when no single address of the image fits. */
-static void **pe_counterpart(HMODULE dxgi, void **slot, void *orig)
+/* Madeira runs an ARM64EC DLL from a JIT-pool copy of its image, so the vtable
+ * a factory points at is the pool copy's, at another address than the PE view
+ * the loader mapped. VirtualProtect on a pool address changes the PE page's
+ * protection and then copies that PE page over the pool copy (the "IAT sync"
+ * in virtual_ios.c), once when the page becomes writable and once when its
+ * protection is restored. A slot written only in the pool copy is put back by
+ * the second copy: Slay the Spire 2's log has the patch line and then DXMT's
+ * own "Not implemented" from CreateSwapChainForComposition on every frame.
+ * pe_view() finds the PE view's address of a pool-copy address in `module`,
+ * so the slot can be written in both. It returns the address itself when it
+ * already lies in the PE view (no pool copy), or NULL when no copy of the
+ * module's headers is found below it within the image's size. */
+static void *pe_view(HMODULE module, void *address)
 {
-    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)dxgi;
-    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)dxgi + dos->e_lfanew);
-    char *p = (char *)dxgi, *end = p + nt->OptionalHeader.SizeOfImage;
-    void **found = NULL;
-    unsigned n = 0;
+    const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)module;
+    const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)module + dos->e_lfanew);
+    uintptr_t base = (uintptr_t)module, at = (uintptr_t)address, size = nt->OptionalHeader.SizeOfImage, page;
+    /* the DOS header, the PE signature and the file header: the loader may
+     * rewrite OptionalHeader.ImageBase in one view, never these */
+    const size_t nt_part = sizeof(DWORD) + sizeof(IMAGE_FILE_HEADER);
 
-    if ((char *)slot >= p && (char *)slot < end) return slot;   /* no copy: the image itself */
-    while (p < end) {
-        MEMORY_BASIC_INFORMATION mbi;
-        char *q, *stop;
-        if (!VirtualQuery(p, &mbi, sizeof mbi) || !mbi.RegionSize) break;
-        stop = (char *)mbi.BaseAddress + mbi.RegionSize;
-        if (stop > end) stop = end;
-        if (mbi.State == MEM_COMMIT && !(mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD))) {
-            for (q = (char *)(((ULONG_PTR)p + 7) & ~(ULONG_PTR)7); q + sizeof(void *) <= stop; q += sizeof(void *)) {
-                ULONG_PTR d = (ULONG_PTR)slot - (ULONG_PTR)q;
-                if (*(ULONG_PTR *)q != (ULONG_PTR)orig - d) continue;
-                /* the entry before must fit the same distance too */
-                if (q - sizeof(void *) < (char *)dxgi ||
-                    *(ULONG_PTR *)(q - sizeof(void *)) != (ULONG_PTR)slot[-1] - d) continue;
-                if (!n++) found = (void **)q;
-            }
-        }
-        p = stop;
+    if (at - base < size) return address;
+    for (page = at & ~(uintptr_t)0xfff; at - page < size; page -= 0x1000) {
+        const IMAGE_NT_HEADERS *copy = (const IMAGE_NT_HEADERS *)(page + dos->e_lfanew);
+        if (IsBadReadPtr((const void *)page, sizeof *dos)) return NULL;
+        if (memcmp((const void *)page, dos, sizeof *dos)) continue;
+        if (IsBadReadPtr(copy, sizeof *copy)) return NULL;
+        if (!memcmp(copy, nt, nt_part) && copy->OptionalHeader.SizeOfImage == size)
+            return (void *)(base + (at - page));
     }
-    dcomp_log("[dcomp] PE vtable entry for pool slot %p: %u candidate(s), %p\n", slot, n, found);
-    return n == 1 ? found : NULL;
+    return NULL;
 }
 
 /* Points the factory vtable's CreateSwapChainForComposition at
  * composition_swap_chain. Every factory of a dxgi.dll shares the vtable, so
- * one patch covers the game's factory, made before this DLL was loaded. */
+ * one patch covers the game's factory, made before this DLL was loaded. The
+ * slot is written in the PE view as well as in the pool copy (pe_view), then
+ * read back after the protection is restored. */
 static void patch_factory(void)
 {
     typedef HRESULT (WINAPI *create_fn)(REFIID, void **);
     HMODULE dxgi = GetModuleHandleA("dxgi.dll");
     create_fn create;
     IDXGIFactory2 *factory = NULL;
-    void **slot, **pe;
+    void **slot, **pe_slot;
     DWORD old;
 
     if (!dxgi) { dcomp_log("[dcomp] dxgi.dll not loaded: composition swap chains stay unsupported\n"); return; }
@@ -163,17 +158,19 @@ static void patch_factory(void)
     }
     slot = (void **)&factory->lpVtbl->CreateSwapChainForComposition;
     if (*slot != (void *)composition_swap_chain) {
-        void *orig = *slot;
-        if (!(pe = pe_counterpart(dxgi, slot, orig))) {
-            dcomp_log("[dcomp] DXGI factory vtable entry not found in dxgi.dll's image\n");
-        } else if (VirtualProtect(pe, sizeof *pe, PAGE_READWRITE, &old)) {
-            orig_composition = (comp_fn)orig;
-            *pe = (void *)composition_swap_chain;
-            VirtualProtect(pe, sizeof *pe, old, &old);   /* copies the image into the pool copy */
-            dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains "
-                      "(dxgi %p vtbl %p slot %p, PE %p: %p -> %p, slot reads %p)\n",
-                      dxgi, factory->lpVtbl, slot, pe, orig, (void *)composition_swap_chain,
-                      *(void *volatile *)slot);
+        pe_slot = (void **)pe_view(dxgi, slot);
+        if (VirtualProtect(slot, sizeof *slot, PAGE_READWRITE, &old)) {
+            orig_composition = (comp_fn)*slot;
+            if (pe_slot && pe_slot != slot) *pe_slot = (void *)composition_swap_chain;
+            *slot = (void *)composition_swap_chain;
+            VirtualProtect(slot, sizeof *slot, old, &old);
+            FlushInstructionCache(GetCurrentProcess(), slot, sizeof *slot);
+            if (*slot == (void *)composition_swap_chain)
+                dcomp_log("[dcomp] DXGI factory: composition swap chains become window swap chains "
+                          "(slot %p, PE view %p)\n", slot, pe_slot);
+            else
+                dcomp_log("[dcomp] DXGI factory: the patch did not stay (slot %p holds %p, PE view %p): "
+                          "composition swap chains stay unsupported\n", slot, *slot, pe_slot);
         } else {
             dcomp_log("[dcomp] DXGI factory vtable not writable (error %lu)\n", GetLastError());
         }

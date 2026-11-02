@@ -703,16 +703,16 @@ struct SteamSettingsSection: View {
             } else {
                 Button { open(.steamSignIn) } label: { Label("Sign in to Steam", systemImage: "person.crop.circle.badge.plus") }
             }
-            // Off: no Steam Cloud checks, transfers or prompts before Play (docs/STEAM_CLOUD.md).
-            if SteamOwnedLibrary.enabled {
-                Toggle("Steam Cloud saves", isOn: $cloud.on)
-            }
             Picker("Game language", selection: $language) {
                 Text("Device language (\(SteamLanguage.name(SteamLanguage.device)))").tag("")
                 ForEach(SteamLanguage.all, id: \.code) { Text($0.name).tag($0.code) }
             }
             .pickerStyle(.navigationLink)
             .onChange(of: language) { _, value in SteamLanguage.choose(value.isEmpty ? nil : value) }
+            // Off: no Steam Cloud checks, transfers or prompts before Play (docs/STEAM_CLOUD.md).
+            if SteamOwnedLibrary.enabled {
+                Toggle("Steam Cloud saves", isOn: $cloud.on)
+            }
             if MadeiraDock.enabled {
                 Button { open(.dock) } label: { Label("Madeira Dock", systemImage: "shippingbox") }
                 if let status = dock.status {

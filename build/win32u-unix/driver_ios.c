@@ -60,6 +60,13 @@ extern UINT winios_pShowWindow( HWND hwnd, INT cmd, RECT *rect, UINT swp ) __att
 extern void winios_pWindowPosChanged( HWND hwnd, HWND insert_after, HWND owner_hint, UINT swp_flags,
                                       const struct window_rects *new_rects, struct window_surface *surface ) __attribute__((weak));
 
+extern UINT winios_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs,
+                               const struct opengl_driver_funcs **driver_funcs );
+/* vulkan_ios.c: VK_KHR_win32_surface on the window's CAMetalLayer. Only reached
+ * once a session loaded a Vulkan library (MADEIRA_VULKAN_LIBRARY). */
+extern UINT madeira_ios_VulkanInit( UINT version, void *vulkan_handle,
+                               const struct vulkan_driver_funcs **driver_funcs );
+
 static struct user_driver_funcs winios_user_driver;
 
 /* Direct mode (no virtual desktop) has no compositor to draw the Windows
@@ -69,6 +76,7 @@ static struct user_driver_funcs winios_user_driver;
  * program hides it, and where Wine's cursor is after clipping; it changes
  * nothing the program sees, and does nothing until the app has asked for the
  * reports (MADEIRA_DIRECT_CURSOR=0 or MADEIRA_HWINPUT=0 in the app: never). */
+extern int winios_mouse_routing_enabled( void ) __attribute__((weak));
 extern int winios_direct_cursor_wanted( void ) __attribute__((weak));
 extern void winios_direct_cursor_set( unsigned int id, int w, int h, int hot_x, int hot_y,
                                       const void *bgra ) __attribute__((weak));
@@ -77,9 +85,15 @@ extern void winios_direct_cursor_pos( int x, int y ) __attribute__((weak));
 
 static int winios_desktop_mode(void);
 
+static int winios_mouse_routing_on(void)
+{
+    return !winios_mouse_routing_enabled || winios_mouse_routing_enabled();
+}
+
 static int winios_direct_cursor_on(void)
 {
-    return !winios_desktop_mode() && winios_direct_cursor_wanted && winios_direct_cursor_wanted();
+    return (!winios_desktop_mode() || winios_mouse_routing_on()) &&
+           winios_direct_cursor_wanted && winios_direct_cursor_wanted();
 }
 
 /* Wine's cursor position, read the way NtUserGetCursorPos does but without the
@@ -99,7 +113,7 @@ static void winios_report_cursor_pos(void)
     if (!status) winios_direct_cursor_pos( x, y );
 }
 
-/* A program moved its cursor itself (SetCursorPos). Direct mode only. */
+/* A program moved its cursor itself (SetCursorPos). Metadata is used in both modes. */
 static BOOL winios_drv_set_cursor_pos( INT x, INT y )
 {
     if (winios_direct_cursor_on()) winios_direct_cursor_pos( x, y );
@@ -222,14 +236,65 @@ void winios_drv_post_key(unsigned short vk, unsigned int flags)
          * old "first 40 lines" cap was exhausted by arrow keys early in the
          * session, so the WASD presses that prompted this fix left no trace at
          * all and the log looked like they were never sent. Log the first few,
-         * then one line per 256 with a running total that is always truthful. */
+         * then one line per 256 with a running total that is always truthful.
+         * The line counts keys and never names them: the first few keys of a
+         * session are often a password. */
         static unsigned cnt, bad;
         if (st) bad++;
         cnt++;
         if (cnt <= 8 || (cnt & 0xff) == 0)
-            dprintf(2, "[winios] ml647 drv_post_key #%u vk=0x%x scan=0x%x flags=0x%x "
-                       "-> status=0x%x (failures=%u)\n",
-                    cnt, vk, scan, flags, (unsigned)st, bad);
+            dprintf(2, "[winios] ml647 drv_post_key #%u -> status=0x%x (failures=%u)\n",
+                    cnt, (unsigned)st, bad);
+    }
+}
+
+/* Same key input as the hardware bridge, without logging pasted text. */
+static void winios_text_key(unsigned short vk, unsigned int flags)
+{
+    INPUT input = {0};
+    input.type = INPUT_KEYBOARD;
+    input.ki.wVk = vk;
+    input.ki.wScan = NtUserMapVirtualKeyEx( vk, MAPVK_VK_TO_VSC_EX, NtUserGetKeyboardLayout(0) ) & 0xff;
+    input.ki.dwFlags = flags;
+    send_hardware_message( NULL, 0, &input, 0 );
+}
+
+/* A complete pasted character is emitted on the Wine event-pump thread. */
+void winios_drv_post_text(unsigned int scalar, unsigned short vk, int shift)
+{
+    INPUT input = {0};
+    unsigned short units[2];
+    unsigned int count, i;
+
+    if (vk)
+    {
+        if (vk >= 'A' && vk <= 'Z' && (NtUserGetKeyState( VK_CAPITAL ) & 1)) shift = !shift;
+        ios_foreground_if_none( "pasted text" );
+        if (shift) winios_text_key( VK_SHIFT, 0 );
+        winios_text_key( vk, 0 );
+        winios_text_key( vk, KEYEVENTF_KEYUP );
+        if (shift) winios_text_key( VK_SHIFT, KEYEVENTF_KEYUP );
+        return;
+    }
+    if (scalar > 0x10ffff || (scalar >= 0xd800 && scalar <= 0xdfff)) return;
+    if (scalar > 0xffff)
+    {
+        scalar -= 0x10000;
+        units[0] = 0xd800 + (scalar >> 10);
+        units[1] = 0xdc00 + (scalar & 0x3ff);
+        count = 2;
+    }
+    else { units[0] = scalar; count = 1; }
+
+    input.type = INPUT_KEYBOARD;
+    ios_foreground_if_none( "pasted text" );
+    for (i = 0; i < count; i++)
+    {
+        input.ki.wScan = units[i];
+        input.ki.dwFlags = KEYEVENTF_UNICODE;
+        send_hardware_message( NULL, 0, &input, 0 );
+        input.ki.dwFlags |= KEYEVENTF_KEYUP;
+        send_hardware_message( NULL, 0, &input, 0 );
     }
 }
 
@@ -446,6 +511,46 @@ int winios_drv_foreground_if_owner( HWND hwnd )
     if (!NtUserSetForegroundWindow( hwnd )) return -1;
     winios_click_focus( hwnd, "activate" );
     return 1;
+}
+
+/* Opt-in for engines which draw and read mouse positions in monitor pixels
+ * while leaving their initial small HWND unchanged. Keep normal windowed
+ * games alone; the app queues this only for MADEIRA_DIRECT_WINDOW_SIZE=1. */
+int winios_drv_size_game_window( HWND hwnd, int width, int height )
+{
+    static _Thread_local BOOL resizing;
+    struct window_rects rects;
+    int cw, ch, outer_w, outer_h;
+    BOOL ok;
+
+    if (resizing || !hwnd || get_window_thread( hwnd, NULL ) != GetCurrentThreadId()) return 0;
+    if (width <= 0 || height <= 0 || !get_window_rects( hwnd, COORDS_SCREEN, &rects, get_thread_dpi() )) return -1;
+    cw = rects.client.right - rects.client.left;
+    ch = rects.client.bottom - rects.client.top;
+    if (cw == width && ch == height) return 1;
+    outer_w = width + rects.window.right - rects.window.left - cw;
+    outer_h = height + rects.window.bottom - rects.window.top - ch;
+    resizing = TRUE;
+    ok = NtUserSetWindowPos( hwnd, 0, rects.window.left - rects.client.left,
+                           rects.window.top - rects.client.top, outer_w, outer_h,
+                           SWP_NOZORDER | SWP_NOACTIVATE );
+    resizing = FALSE;
+    dprintf( 2, "[winios] direct window size hwnd=%p client=%dx%d -> %dx%d ok=%d\n",
+             hwnd, cw, ch, width, height, ok );
+    return ok ? 1 : -1;
+}
+
+/* The end of a Dock session: Madeira Dock has shut Valve's client down after the
+ * game, but explorer's virtual desktop never closes by itself on iOS (server
+ * winstation.c, "desktop auto-close suppressed"). WM_CLOSE makes the desktop's
+ * message loop quit and explorer exit, which ends the session. Only the desktop
+ * window's own thread posts it, from its event pump. Returns 0 on another
+ * thread, 1 when posted, -1 on failure. */
+int winios_drv_close_desktop_if_owner( void )
+{
+    HWND desktop = get_desktop_window();
+    if (!desktop || get_window_thread( desktop, NULL ) != GetCurrentThreadId()) return 0;
+    return NtUserPostMessage( desktop, WM_CLOSE, 0, 0 ) ? 1 : -1;
 }
 
 /* ============================================================ *
@@ -2090,9 +2195,16 @@ static LRESULT nulldrv_WintabProc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lp
     return 0;
 }
 
+#ifdef MADEIRA_MOLTENVK
+extern UINT madeira_ios_VulkanInit( UINT version, void *handle, const struct vulkan_driver_funcs **funcs );
+#endif
 static UINT nulldrv_VulkanInit( UINT version, void *vulkan_handle, const struct vulkan_driver_funcs **driver_funcs )
 {
+#ifdef MADEIRA_MOLTENVK
+    return madeira_ios_VulkanInit( version, vulkan_handle, driver_funcs );
+#else
     return STATUS_NOT_IMPLEMENTED;
+#endif
 }
 
 static UINT nulldrv_OpenGLInit( UINT version, const struct opengl_funcs *opengl_funcs, const struct opengl_driver_funcs **driver_funcs )
@@ -2224,7 +2336,7 @@ static void load_display_driver(void)
         /* direct mode: inert (like winios_pSetCursor) until the app enables it */
         else if (winios_direct_cursor_set) winios_user_driver.pSetCursor         = winios_drv_set_cursor;
         else if (winios_pSetCursor)      winios_user_driver.pSetCursor           = winios_pSetCursor;
-        if (!winios_desktop_mode() && winios_direct_cursor_pos)
+        if ((!winios_desktop_mode() || winios_mouse_routing_on()) && winios_direct_cursor_pos)
             winios_user_driver.pSetCursorPos = winios_drv_set_cursor_pos;
         if (winios_pDestroyCursorIcon)   winios_user_driver.pDestroyCursorIcon   = winios_pDestroyCursorIcon;
         if (winios_pShowWindow)          winios_user_driver.pShowWindow          = winios_pShowWindow;
@@ -2255,6 +2367,12 @@ static void load_display_driver(void)
                         "(MADEIRA_GAME_WINDOWS=0 hides them)\n" );
         }
         winios_user_driver.pUpdateDisplayDevices = winios_UpdateDisplayDevices;
+        /* OpenGL ES behind WGL (opengl_ios.c). MADEIRA_NO_GL=1 restores the
+         * GL-absent behaviour (every context creation fails). */
+        if (!getenv( "MADEIRA_NO_GL" )) winios_user_driver.pOpenGLInit = winios_OpenGLInit;
+        /* Vulkan surfaces on Metal (vulkan_ios.c). win32u calls it only after a
+         * Vulkan library was loaded, which needs MADEIRA_VULKAN_LIBRARY. */
+        winios_user_driver.pVulkanInit = madeira_ios_VulkanInit;
         __wine_set_user_driver( &winios_user_driver, WINE_GDI_DRIVER_VERSION );
 #else
         __wine_set_user_driver( &null_user_driver, WINE_GDI_DRIVER_VERSION );

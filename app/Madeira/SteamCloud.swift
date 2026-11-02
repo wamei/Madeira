@@ -97,6 +97,10 @@ struct SteamCloudPaths: Sendable {
     var remoteFolder: URL
     var steamID: UInt64
     var overrides: [SteamAppInfo.RootOverride]
+    /// Present only for an SSD install. Internal Wine user-folder links retain
+    /// their existing behaviour; GameInstall saves must stay inside this library.
+    var externalLibraryRoot: URL? = nil
+    var externalLibraryID: String? = nil
 
     /// The Windows user folder games write to. A prefix can hold several
     /// folders under users (the template's, earlier builds'). Games find theirs
@@ -212,19 +216,33 @@ struct SteamCloudPaths: Sendable {
     /// Wine treats names without regard to case and iOS does not: follow the
     /// components by case-insensitive match, falling back to the given
     /// spelling for the part that does not exist yet.
-    static func resolve(base: URL, parts: [String]) -> URL {
-        var url = base
+    func resolve(base: URL, parts: [String]) throws -> URL {
+        var url = try validateInstallURL(base)
         for (index, part) in parts.enumerated() {
-            let exact = url.appendingPathComponent(part, isDirectory: index < parts.count - 1)
+            let exact = try validateInstallURL(url.appendingPathComponent(part, isDirectory: index < parts.count - 1))
             if FileManager.default.fileExists(atPath: exact.path) { url = exact; continue }
             let names = (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? []
             if let match = names.first(where: { $0.caseInsensitiveCompare(part) == .orderedSame }) {
-                url = url.appendingPathComponent(match, isDirectory: index < parts.count - 1)
+                url = try validateInstallURL(url.appendingPathComponent(match, isDirectory: index < parts.count - 1))
             } else {
                 url = exact
             }
         }
         return url
+    }
+
+    /// Check lexical components before following them, including dangling links.
+    /// Enumeration also calls this before inspecting a local-only save.
+    func validateInstallURL(_ url: URL) throws -> URL {
+        guard let externalLibraryRoot else { return url }
+        guard try externalLibraryRoot.checkResourceIsReachable() else { throw ExternalStorageError.unavailable }
+        if let externalLibraryID { try ExternalStorageIdentity.verify(externalLibraryID, root: externalLibraryRoot) }
+        let path = url.standardizedFileURL.path
+        let install = installFolder.standardizedFileURL.path
+        guard path == install || path.hasPrefix(install + "/") else { return url }
+        let root = externalLibraryRoot.resolvingSymlinksInPath().standardizedFileURL
+        guard path.hasPrefix(root.path + "/") else { throw ExternalStorageError.unsafePath }
+        return try ExternalStoragePath.native(String(path.dropFirst(root.path.count + 1)), root: root)
     }
 }
 
@@ -239,11 +257,11 @@ struct SteamCloudPaths: Sendable {
 /// writes under mobile: The Adventures of Elliot kept its saves under mobile
 /// while Steam Cloud put the cloud's saves under mythic. The profile is now the
 /// unix user's everywhere: the registry's paths are rewritten to it and the
-/// template profile's files are moved into it, once, before Wine starts (run
+/// template profile's files are copied into it, once, before Wine starts (run
 /// from MadeiraApp.init; the wineserver rewrites the .reg files from memory, so
 /// it must not be running).
 ///
-/// A file present in both folders keeps the newer copy; the other is moved to
+/// A file present in both folders keeps the newer copy; the other is copied to
 /// Files › Madeira › Profile Merge Backups. After such a collision the Steam
 /// Cloud record is dropped, so a save that now differs from the cloud is shown
 /// as a choice instead of being uploaded or downloaded unasked.
@@ -259,29 +277,38 @@ enum ProfileUnification {
         guard let user = unixUser(), let old = SteamCloudPaths.profileName(prefix: prefix),
               old.caseInsensitiveCompare(user) != .orderedSame else { return }
 
-        // The registry first: without it the moved files would sit where nothing
-        // looks. A .reg file that is present but cannot be rewritten stops here.
+        let source = users.appendingPathComponent(old, isDirectory: true)
+        let target = users.appendingPathComponent(user, isDirectory: true)
+        var moved = 0, collisions = 0
+        let backup = prefix.deletingLastPathComponent()
+            .appendingPathComponent("Profile Merge Backups/\(UUID().uuidString)", isDirectory: true)
+        do {
+            // Invalidate the old sync record before any save can change.
+            let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("Madeira/steam-cloud-sync.json")
+            if fm.fileExists(atPath: support.path) { try fm.removeItem(at: support) }
+            if fm.fileExists(atPath: source.path) {
+                let sourceType = try fm.attributesOfItem(atPath: source.path)[.type] as? FileAttributeType
+                let targetType = (try? fm.attributesOfItem(atPath: target.path)[.type]) as? FileAttributeType
+                guard sourceType == .typeDirectory, targetType == nil || targetType == .typeDirectory
+                else { throw CocoaError(.fileWriteInvalidFileName) }
+                try fm.createDirectory(at: target, withIntermediateDirectories: true)
+                try merge(source, into: target, backup: backup, depth: 24, moved: &moved, collisions: &collisions)
+            }
+        } catch {
+            LogStore.shared.log("[profile] could not copy the profile; old files and registry paths are kept: \(error)", level: .error)
+            return
+        }
+        // Keep the old profile as a recovery copy, including after a partial registry write.
         var rewritten = 0
         for name in ["system.reg", "user.reg", "userdef.reg"] {
             let url = prefix.appendingPathComponent(name)
             guard fm.fileExists(atPath: url.path) else { continue }
             guard let hits = rewrite(url, from: old, to: user) else {
-                LogStore.shared.log("[profile] could not rewrite \(name); the profile stays as it is", level: .error)
+                LogStore.shared.log("[profile] could not rewrite \(name); both profile copies are kept", level: .error)
                 return
             }
             rewritten += hits
-        }
-
-        let source = users.appendingPathComponent(old, isDirectory: true)
-        let target = users.appendingPathComponent(user, isDirectory: true)
-        var moved = 0, collisions = 0
-        if fm.fileExists(atPath: source.path) {
-            try? fm.createDirectory(at: target, withIntermediateDirectories: true)
-            let stamp = ISO8601DateFormatter().string(from: Date()).replacingOccurrences(of: ":", with: "-")
-            let backup = prefix.deletingLastPathComponent()
-                .appendingPathComponent("Profile Merge Backups/\(stamp)", isDirectory: true)
-            merge(source, into: target, backup: backup, depth: 24, moved: &moved, collisions: &collisions)
-            if (try? fm.contentsOfDirectory(atPath: source.path))?.isEmpty == true { try? fm.removeItem(at: source) }
         }
         if collisions > 0 {
             let support = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -289,7 +316,7 @@ enum ProfileUnification {
             try? fm.removeItem(at: support)
         }
         LogStore.shared.log("[profile] one Windows profile: \(rewritten) registry path(s) now name the unix user's folder; "
-            + "\(moved) item(s) moved from the template profile, \(collisions) collision(s) kept newer"
+            + "\(moved) item(s) copied from the template profile, \(collisions) collision(s) kept newer"
             + (collisions > 0 ? " (older copies in Files › Madeira › Profile Merge Backups; Steam Cloud record reset)" : ""),
             level: .success)
     }
@@ -331,41 +358,51 @@ enum ProfileUnification {
         return hits
     }
 
-    /// Moves `source`'s contents into `target`. Where both have a file, the newer
-    /// stays in `target` and the other goes to `backup` (same relative path).
+    /// Copies saves before changing registry paths. The old profile stays as a recovery copy.
     private static func merge(_ source: URL, into target: URL, backup: URL, depth: Int,
-                              moved: inout Int, collisions: inout Int) {
+                              moved: inout Int, collisions: inout Int) throws {
         let fm = FileManager.default
-        guard depth > 0, let names = try? fm.contentsOfDirectory(atPath: source.path) else { return }
-        for name in names {
+        guard depth > 0 else { throw CocoaError(.fileReadTooLarge) }
+        for name in try fm.contentsOfDirectory(atPath: source.path) {
             let from = source.appendingPathComponent(name), to = target.appendingPathComponent(name)
-            var fromDir: ObjCBool = false, toDir: ObjCBool = false
-            guard fm.fileExists(atPath: from.path, isDirectory: &fromDir) else { continue }
-            if !fm.fileExists(atPath: to.path, isDirectory: &toDir) {
-                if (try? fm.moveItem(at: from, to: to)) != nil { moved += 1 }
+            let fromType = try fm.attributesOfItem(atPath: from.path)[.type] as? FileAttributeType
+            let toType = (try? fm.attributesOfItem(atPath: to.path)[.type]) as? FileAttributeType
+            guard let toType else {
+                try fm.copyItem(at: from, to: to)
+                moved += 1
                 continue
             }
-            if fromDir.boolValue && toDir.boolValue {
-                merge(from, into: to, backup: backup.appendingPathComponent(name, isDirectory: true), depth: depth - 1,
-                      moved: &moved, collisions: &collisions)
-                if (try? fm.contentsOfDirectory(atPath: from.path))?.isEmpty == true { try? fm.removeItem(at: from) }
+            if fromType == .typeDirectory && toType == .typeDirectory {
+                try merge(from, into: to, backup: backup.appendingPathComponent(name, isDirectory: true), depth: depth - 1,
+                          moved: &moved, collisions: &collisions)
                 continue
             }
-            // Both exist and are not both folders: keep the newer in place.
+            // Do not follow Windows junctions or symbolic links into another tree.
+            guard fromType != .typeSymbolicLink && toType != .typeSymbolicLink else {
+                throw CocoaError(.fileWriteInvalidFileName)
+            }
             collisions += 1
-            func date(_ url: URL) -> Date {
-                (try? url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            func date(_ url: URL) throws -> Date {
+                try url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate ?? .distantPast
             }
-            try? fm.createDirectory(at: backup, withIntermediateDirectories: true)
+            try fm.createDirectory(at: backup, withIntermediateDirectories: true)
             let saved = backup.appendingPathComponent(name)
-            if date(from) > date(to) {
-                try? fm.moveItem(at: to, to: saved)
-                try? fm.moveItem(at: from, to: to)
+            if try date(from) > date(to) {
+                try fm.copyItem(at: to, to: saved)
+                try fm.removeItem(at: to)
+                do { try fm.copyItem(at: from, to: to) }
+                catch {
+                    if fm.fileExists(atPath: to.path) { try? fm.removeItem(at: to) }
+                    try fm.copyItem(at: saved, to: to)
+                    throw error
+                }
+                moved += 1
             } else {
-                try? fm.moveItem(at: from, to: saved)
+                try fm.copyItem(at: from, to: saved)
             }
         }
     }
+
 }
 
 // MARK: - Comparison
@@ -406,9 +443,12 @@ struct SteamCloudAudit: Equatable, Sendable {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         var hasher = Insecure.SHA1()
-        while true {
-            guard let chunk = try? handle.read(upToCount: 1 << 20), !chunk.isEmpty else { break }
-            hasher.update(data: chunk)
+        do {
+            while let chunk = try handle.read(upToCount: 1 << 20), !chunk.isEmpty {
+                hasher.update(data: chunk)
+            }
+        } catch {
+            return nil  // A partial digest is not a checksum of this save.
         }
         return Data(hasher.finalize())
     }
@@ -423,14 +463,15 @@ struct SteamCloudAudit: Equatable, Sendable {
     private static func key(_ url: URL) -> String { url.resolvingSymlinksInPath().path.lowercased() }
 
     /// Compares the listing with the prefix. Reads files; changes nothing.
-    static func run(listing: SteamCloudListing, saveFiles: [SteamAppInfo.SaveFile], paths: SteamCloudPaths) -> SteamCloudAudit {
+    static func run(listing: SteamCloudListing, saveFiles: [SteamAppInfo.SaveFile], paths: SteamCloudPaths) throws -> SteamCloudAudit {
+        _ = try paths.validateInstallURL(paths.installFolder)
         var audit = SteamCloudAudit()
         audit.changeNumber = listing.changeNumber
         var known = Set<String>()   // local paths the cloud lists
         for file in listing.files where file.persistState == 0 {
             audit.cloudFiles += 1
             guard let place = paths.location(cloudPath: file.path) else { audit.unmapped.append(file.path); continue }
-            let url = SteamCloudPaths.resolve(base: place.base, parts: place.parts)
+            let url = try paths.resolve(base: place.base, parts: place.parts)
             known.insert(key(url))
             var entry = SteamCloudEntry(path: file.path, kind: .cloudOnly, cloudSize: file.size, cloudTime: file.timestamp, cloudSHA: file.sha)
             if let local = attributes(url) {
@@ -444,7 +485,7 @@ struct SteamCloudAudit: Equatable, Sendable {
         var folders: [(label: String, url: URL, pattern: String, recursive: Bool)] = []
         for save in saveFiles where save.platforms.isEmpty || save.platforms.contains("windows") {
             guard let place = paths.location(cloudPath: "%\(save.root)%" + (save.path.isEmpty ? "x" : save.path + "/x")) else { continue }
-            let folder = SteamCloudPaths.resolve(base: place.base, parts: Array(place.parts.dropLast()))
+            let folder = try paths.resolve(base: place.base, parts: Array(place.parts.dropLast()))
             // A Windows override moves the folder: its cloud name is not this one, so
             // files found there are not offered for upload.
             if paths.overrides.contains(where: { $0.root.caseInsensitiveCompare(save.root) == .orderedSame
@@ -467,6 +508,7 @@ struct SteamCloudAudit: Equatable, Sendable {
             for case let url as URL in walk {
                 visited += 1
                 if visited > 5_000 { break }
+                _ = try paths.validateInstallURL(url)
                 guard fnmatch(folder.pattern, url.lastPathComponent, FNM_CASEFOLD) == 0, let local = attributes(url) else { continue }
                 let fileKey = key(url)
                 guard !known.contains(fileKey), seen.insert(fileKey).inserted else { continue }
@@ -829,6 +871,8 @@ struct SteamCloudPlan: Equatable, Sendable {
             case .same:
                 plan.settled[entry.key] = hex(entry.cloudSHA)
             case .differ:
+                // Without a complete local checksum neither side can be chosen automatically.
+                guard !entry.localSHA.isEmpty else { plan.conflicts.append(entry); continue }
                 // A save that was missing here and is back is a new file, not a
                 // change of the synced one: never copied over the cloud's unasked.
                 let cloud = hex(entry.cloudSHA), local = hex(entry.localSHA)
@@ -978,6 +1022,13 @@ struct SteamCloudState: Equatable, Sendable {
     var lastUpload: Int?
     /// Why the last download or upload stopped, shown on the game's page.
     var problem: String?
+
+    mutating func retryFailedCheck() {
+        guard case .failed = phase else { return }
+        phase = .ready
+        checked = nil // cloudHold treats this as stale and requires a fresh audit.
+        problem = nil
+    }
 
     static func == (a: SteamCloudState, b: SteamCloudState) -> Bool {
         a.phase == b.phase && a.audit == b.audit && a.checked == b.checked && a.conflicts == b.conflicts

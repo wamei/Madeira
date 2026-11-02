@@ -15,7 +15,7 @@ TC="$R/toolchains/llvm-mingw-20260421-ucrt-macos-universal/bin"
 export PATH="$TC:$PATH"
 B="$R/wine/build-arm64ec"
 if [ ! -f "$B/config.status" ]; then
-    mkdir -p "$B" && cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --enable-winegstreamer
+    mkdir -p "$B" && cd "$B" && ../configure --enable-archs=arm64ec --without-x --disable-tests --without-freetype --without-gnutls --enable-winegstreamer
 fi
 # Only the PE half: `make -C dlls/ntdll` also links the macOS ntdll.so, which
 # fails on the iOS-only symbols the tree's unix side now references.

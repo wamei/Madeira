@@ -15,12 +15,13 @@ enum SettingsPages {
     static var enabled: Bool { MadeiraConfig.flag("MADEIRA_SETTINGS_PAGES") }
 
     enum Page: Hashable, CaseIterable {
-        case steam, itch, epic, ea, runtimes, graphics, display, memory, pointer, jit, signing, saves, drives,
+        case steam, gog, itch, epic, ea, runtimes, graphics, display, memory, pointer, jit, signing, saves, drives,
              appearance, advanced, credits
 
         var title: String {
             switch self {
             case .steam: return "Steam and Dock"
+            case .gog: return "GOG"
             case .itch: return "itch.io"
             case .epic: return "Epic Games"
             case .ea: return "EA app"
@@ -42,6 +43,7 @@ enum SettingsPages {
         var symbol: String {
             switch self {
             case .steam: return "shippingbox"
+            case .gog: return "bag"
             case .itch: return "arrow.down.app"
             case .epic: return "gamecontroller"
             case .ea: return "arrow.down.circle"
@@ -64,6 +66,7 @@ enum SettingsPages {
         @MainActor var shown: Bool {
             switch self {
             case .steam: return SteamSettingsSection.shown
+            case .gog: return GOGLibrary.enabled
             case .itch: return ItchLibrary.enabled
             case .epic: return EpicLibrary.enabled
             case .ea: return EALibrary.enabled
@@ -77,7 +80,7 @@ enum SettingsPages {
 
     /// The rows of the Settings tab, in groups.
     static let groups: [(String?, [Page])] = [
-        ("Getting games", [.steam, .itch, .epic, .ea, .runtimes]),
+        ("Getting games", [.steam, .gog, .itch, .epic, .ea, .runtimes]),
         ("Running games", [.graphics, .display, .memory, .pointer]),
         ("Device", [.jit, .signing, .saves, .drives]),
         (nil, [.appearance, .advanced, .credits]),
@@ -134,6 +137,7 @@ struct SettingsPageView: View {
     @ObservedObject private var liquidMetal = LiquidMetalSetting.shared
     @AppStorage(LibraryGridArm.key) private var zoomableGrid = false
     @AppStorage(GridZoomHapticPlayer.key) private var zoomHaptics = true
+    @AppStorage(TouchControlStyle.key) private var controlStyle = "glass"
     @State private var developerUI = !FrontendChoice.preferNew
     @State private var restartNotice = false
 
@@ -149,6 +153,7 @@ struct SettingsPageView: View {
                 switch sheet {
                 case .allSettings: AllSettingsView()
                 case .steamSignIn: SteamSignInView()
+                case .gogSignIn: GOGSignInView()
                 case .epicSignIn: EpicSignInView()
                 case .eaSignIn: EASignInView()
                 case .dock: MadeiraDockView(start: startDock)
@@ -159,6 +164,7 @@ struct SettingsPageView: View {
     @ViewBuilder private var content: some View {
         switch page {
         case .steam: SteamSettingsSection(open: { sheet = $0 })
+        case .gog: GOGSettingsSection(open: { sheet = $0 })
         case .itch: ItchSettingsSection()
         case .epic: EpicSettingsSection(open: { sheet = $0 })
         case .ea: EASettingsSection(open: { sheet = $0 })
@@ -197,6 +203,13 @@ struct SettingsPageView: View {
             Toggle("Liquid metal", isOn: $liquidMetal.on)
         } footer: {
             Text("Flowing chrome on the bars and the Desktop button. Off, they use the system's Liquid Glass.")
+        }
+        Section {
+            Picker("Touch control buttons", selection: $controlStyle) {
+                ForEach(TouchControlStyle.styles, id: \.id) { Text($0.name).tag($0.id) }
+            }
+        } footer: {
+            Text("Glass is the system's Liquid Glass. Solid draws each button as a plain opaque disc; a game's Opacity slider still fades them.")
         }
         Section {
             Toggle("New library grid", isOn: $zoomableGrid)

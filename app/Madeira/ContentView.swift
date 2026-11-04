@@ -2197,6 +2197,7 @@ struct ContentView: View {
         .sheet(item: $devSheet) { sheet in
             switch sheet {
             case .steamSignIn: SteamSignInView()
+            case .gogSignIn: GOGSignInView()
             case .epicSignIn: EpicSignInView()
             case .eaSignIn: EASignInView()
             case .dock: MadeiraDockView { startDock($0, compactPool: $1) }
@@ -2647,17 +2648,28 @@ struct ContentView: View {
             library.error = "Big Picture needs Madeira Dock's Steam components (Settings › Steam) to start from."
             return
         }
+        // A GOG game's install-script registry values (The Witcher's launcher needs its
+        // InstallFolder), for its own entry or a program added from its folder.
+        GOGLibrary.shared.writeInstallScriptRegistry(for: entry)
+        if entry.gogProductID != nil {
+            // A GOG game: its redistributable installers still to run, before the game
+            // (from the services batch), and GOG's game services while it runs.
+            LibraryEntry.setGOGSetup(GOGLibrary.shared.setupBatch(for: entry), for: entry.id)
+            GOGGalaxy.shared.prepare(entry)
+        }
         do { if entry.desktop != true { _ = try LibraryModel.executable(entry.launchRelativePath) }; try entry.validate() }
         catch {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
             library.error = error.localizedDescription
             logStore.log("[launch-preflight] profile validation failed: \(error.localizedDescription)", level: .error)
+            GOGGalaxy.shared.stop()
             return
         }
         // launchArguments carries the whole ml1163 command (explorer's /desktop=, the quoted
         // program, its arguments); validate() and the bridge's tokenizer take 4 KB.
         guard entry.launchWindowsPath.utf8.count < 1024, entry.launchArguments.utf8.count < 4096 else {
             LibraryEntry.setTransientArguments(nil, for: entry.id)
+            GOGGalaxy.shared.stop()
             library.error = "The executable path or launch arguments are too long."; return
         }
         entry.configureLaunch()
@@ -2730,6 +2742,7 @@ struct ContentView: View {
         // Steam downloads wait for the session, and the app's own Steam connection closes
         // before Valve's client signs in with the same account (SteamOwnedLibrary).
         SteamOwnedLibrary.shared.sessionChanged(active: true)
+        GOGLibrary.shared.sessionChanged(active: true)
         ItchLibrary.shared.sessionChanged(active: true)
         EpicLibrary.shared.sessionChanged(active: true)
         EALibrary.shared.sessionChanged(active: true)
@@ -3600,8 +3613,17 @@ struct ContentView: View {
             if DockGameSession.has32BitProgram(in: gameFolder, machine: DockInstallers.machine) {
                 setenv("MADEIRA_WOW_HOLD_WINDOWS", "1", 1)
                 logStore.log("[dock-wow] the game's folder holds a 32-bit program: one guest-window placeholder is held from session start (MADEIRA_WOW_HOLD_WINDOWS=1)")
+                // The held window goes only to the game's own 32-bit programs: Valve's 32-bit client service,
+                // demand-started seconds into the session once a CEG game installed it, took it and the game
+                // found no slot (2026-11-02). A program from elsewhere still gets any other free slot.
+                if MadeiraConfig.flag("MADEIRA_WOW_HOLD_FOR_GAME") {   // 0: any 32-bit program may take the held window, as before 2026-11-02
+                    setenv("MADEIRA_WOW_HOLD_FOR", game.windowsInstallPath + "\\", 1)
+                } else {
+                    unsetenv("MADEIRA_WOW_HOLD_FOR")
+                }
             } else {
                 unsetenv("MADEIRA_WOW_HOLD_WINDOWS")
+                unsetenv("MADEIRA_WOW_HOLD_FOR")
             }
             // A 64-bit title beside its 32-bit helpers: its memory takes donor RAM first even while
             // a 32-bit program is in the session (virtual_ios.c ios_swap_x64_policy, swap-x64 unset).
@@ -4288,6 +4310,10 @@ struct TouchControlsOverlay: View {
                 // The library between sessions (the window came up for a start that did not
                 // happen) draws nothing over the library's own screens.
                 if landscape && !(library.enabled && !session && !m.editing) {
+                    if m.editing {
+                        Color.clear.contentShape(editorCanvas(geo.size))
+                            .onTapGesture { m.selected = nil; zones.selected = nil }
+                    }
                     if (m.visible || m.editing) && !library.blocksGameplayTouch {
                         if GestureZonesModel.enabled {
                             GestureZonesLayer(screen: geo.size, editing: m.editing)
@@ -4320,6 +4346,22 @@ struct TouchControlsOverlay: View {
         .persistentSystemOverlays(library.current != nil ? .hidden : .automatic)
     }
 
+    /// The dismissal gesture must never take a control's drag on iOS 26.
+    private func editorCanvas(_ screen: CGSize) -> Path {
+        var area = Path(CGRect(origin: .zero, size: screen))
+        for control in m.controls {
+            let size = TouchControlsModel.size(control)
+            let frame = CGRect(x: CGFloat(control.nx) * screen.width - size.width / 2,
+                               y: CGFloat(control.ny) * screen.height - size.height / 2,
+                               width: size.width, height: size.height)
+            area = area.subtracting(Path(frame))
+        }
+        if GestureZonesModel.enabled {
+            for zone in zones.zones { area = area.subtracting(Path(zone.rect(in: screen))) }
+        }
+        return area
+    }
+
     /// Every control in ONE GlassEffectContainer: on iOS 26 the system merges
     /// glass shapes that come within `spacing` of each other, so a D-pad cross
     /// or a face diamond pinched tight reads as one piece of glass and a button
@@ -4327,18 +4369,23 @@ struct TouchControlsOverlay: View {
     /// neighbours sit further apart than that, so nothing merges until it is
     /// moved almost touching. Before 26 the same views stack as plain material.
     @ViewBuilder private func controls(_ screen: CGSize, session: Bool) -> some View {
+        // A library session's Control opacity; full while editing. The opacity
+        // goes on the whole group, not on each button: inside a
+        // GlassEffectContainer the glass is rendered by the container as one
+        // layer over its children, so a button's own .opacity faded its label and
+        // left the glass as it was (the Opacity slider seemed to do nothing).
+        let opacity = session && !m.editing ? library.opacity : 1
         let buttons = ForEach(m.controls) { c in
             TouchControlButton(control: c, screen: screen)
-                // A library session's Control opacity; full while editing.
-                .opacity(session && !m.editing ? library.opacity : 1)
         }
         if #available(iOS 26.0, *) {
             GlassEffectContainer(spacing: 12) {
                 ZStack { buttons }
                     .frame(width: screen.width, height: screen.height, alignment: .topLeading)
             }
+            .opacity(opacity)
         } else {
-            buttons
+            buttons.opacity(opacity)
         }
     }
 
@@ -4478,6 +4525,9 @@ struct GlassShape: View {
     var capsule = false
     var cornerRadius: CGFloat = 18
     var tint: Color? = nil
+    /// The touch controls' Solid button style (TouchControlStyle): a plain opaque
+    /// disc in place of the glass, the tint as its colour.
+    var solid = false
     fileprivate var shape: AnyShape {
         if circle { return AnyShape(Circle()) }
         if capsule { return AnyShape(Capsule()) }
@@ -4495,7 +4545,9 @@ extension View {
     /// sibling of its glass ends up blurred underneath it; a label that is the
     /// glass view's own content is drawn on top, as the system's buttons are.
     @ViewBuilder func glassFace(_ g: GlassShape) -> some View {
-        if #available(iOS 26.0, *) {
+        if g.solid {
+            self.background(g.shape.fill(g.tint ?? TouchControlStyle.solidFill))
+        } else if #available(iOS 26.0, *) {
             if let tint = g.tint {
                 self.glassEffect(.regular.tint(tint.opacity(0.55)), in: g.shape)
             } else {
@@ -4508,6 +4560,17 @@ extension View {
             }
         }
     }
+}
+
+/// The touch controls' button style, remembered for every game: "glass" (the
+/// system's Liquid Glass, as before) or "solid" (an opaque disc, no glass;
+/// the Opacity slider still fades the whole set). Chosen in the in-game menu
+/// and in Settings › Appearance. The overlay's top bar stays glass.
+enum TouchControlStyle {
+    static let key = "madeiraControlsStyle"
+    static let styles: [(id: String, name: String)] = [("glass", "Glass"), ("solid", "Solid")]
+    static let solidFill = Color(red: 0.17, green: 0.17, blue: 0.19)
+    static func isSolid(_ style: String) -> Bool { style == "solid" }
 }
 
 extension ControlAction {
@@ -4528,11 +4591,13 @@ struct TouchControlButton: View {
     let control: TouchControl
     let screen: CGSize
     @ObservedObject private var m = TouchControlsModel.shared
+    @AppStorage(TouchControlStyle.key) private var style = "glass"
     @State private var isDown = false
     @State private var dragBase: CGPoint?
     @State private var stickDir: Int = -1
     @State private var padVector = CGSize.zero
 
+    private var solid: Bool { TouchControlStyle.isSolid(style) }
     private var diameter: CGFloat { TouchControlsModel.diameter(control) }
     private var size: CGSize { TouchControlsModel.size(control) }
     private var isStick: Bool { control.action.stickKeys != nil || control.action.isPadStick }
@@ -4566,19 +4631,19 @@ struct TouchControlButton: View {
                 }
             }
             .frame(width: size.width, height: size.height)
-            .glassFace(GlassShape(circle: true, tint: a.padTint))
+            .glassFace(GlassShape(circle: true, tint: a.padTint, solid: solid))
         case .small:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.36, weight: .semibold))
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(circle: true))
+                .glassFace(GlassShape(circle: true, solid: solid))
         case .wide:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.42, weight: .semibold))
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.88))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(cornerRadius: size.height * 0.30))
+                .glassFace(GlassShape(cornerRadius: size.height * 0.30, solid: solid))
         case .capsule:
             Text(a.padFaceLabel)
                 .font(.system(size: size.height * 0.40, weight: .semibold))
@@ -4588,7 +4653,7 @@ struct TouchControlButton: View {
                 .padding(.horizontal, 6)
                 .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                 .frame(width: size.width, height: size.height)
-                .glassFace(GlassShape(capsule: true))
+                .glassFace(GlassShape(capsule: true, solid: solid))
         }
     }
 
@@ -4602,7 +4667,7 @@ struct TouchControlButton: View {
                     Text(control.action.label).font(.caption).foregroundStyle(.white.opacity(0.8))
                 }
                 .frame(width: diameter, height: diameter)
-                .glassFace(GlassShape(circle: true))
+                .glassFace(GlassShape(circle: true, solid: solid))
             } else if control.action.stickKeys != nil {
                 // Reuse the portrait pad's face so both look and animate the
                 // same; scale it to whatever size this control was pinched to.
@@ -4614,7 +4679,7 @@ struct TouchControlButton: View {
                            height: JoystickFace.padRadius * 2)
                     .scaleEffect(diameter / (JoystickFace.padRadius * 2))
                     .frame(width: diameter, height: diameter)
-                    .glassFace(GlassShape(circle: true))
+                    .glassFace(GlassShape(circle: true, solid: solid))
             } else if control.action.isPad {
                 padFace
             } else {
@@ -4625,7 +4690,7 @@ struct TouchControlButton: View {
                                   weight: .medium))
                     .foregroundStyle(.white.opacity(isDown ? 1.0 : 0.85))
                     .frame(width: size.width, height: size.height)
-                    .glassFace(GlassShape(circle: true))
+                    .glassFace(GlassShape(circle: true, solid: solid))
             }
         }
         .frame(width: size.width, height: size.height)
@@ -4779,6 +4844,7 @@ struct MappingPanel: View {
     let screen: CGSize
     @ObservedObject private var m = TouchControlsModel.shared
     @State private var tab = 0                    // 0 keyboard, 1 controller
+    @State private var resizeDiameter: CGFloat?
 
 
     var body: some View {
@@ -4797,6 +4863,31 @@ struct MappingPanel: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel(control.locked == true ? "Unlock control" : "Lock control")
             }
+            HStack(spacing: 8) {
+                Text("Size").font(.system(size: 12))
+                Slider(value: Binding(get: { control.scale }, set: { value in
+                    if let i = m.index(of: control.id), m.controls[i].locked != true {
+                        m.controls[i].scale = value
+                    }
+                }), in: 0.5...3.0, onEditingChanged: { resizing in
+                    if resizing {
+                        if resizeDiameter == nil { resizeDiameter = TouchControlsModel.diameter(control) }
+                    } else if resizeDiameter != nil {
+                        // Let the slider finish tracking before the panel moves.
+                        DispatchQueue.main.async { resizeDiameter = nil }
+                    }
+                })
+                    .id(control.id)
+                    .disabled(control.locked == true)
+                    .accessibilityLabel("Control size")
+                    .accessibilityValue("\(Int(control.scale * 100)) percent")
+                Text("\(Int(control.scale * 100))%")
+                    .font(.system(size: 12).monospacedDigit())
+                    .frame(width: 42, alignment: .trailing)
+            }
+            .padding(.horizontal, 12)
+            .frame(minHeight: 44)
+            .foregroundStyle(.white)
             Rectangle().fill(.white.opacity(0.15)).frame(height: 1)
             LayerButtons { mv in if let i = m.index(of: control.id) { mv.apply(&m.controls, i) } }
                 .padding(.horizontal, 10)
@@ -4810,6 +4901,8 @@ struct MappingPanel: View {
         .background(GlassShape())
         .clipShape(RoundedRectangle(cornerRadius: 18))
         .overlay(RoundedRectangle(cornerRadius: 18).stroke(.white.opacity(0.18), lineWidth: 1))
+        .contentShape(Rectangle())
+        .onTapGesture { } // Panel gaps must not dismiss the selection beneath them.
         .position(layout.center)
     }
 
@@ -4829,7 +4922,7 @@ struct MappingPanel: View {
     private var layout: Placement {
         let cx = CGFloat(control.nx) * screen.width
         let cy = CGFloat(control.ny) * screen.height
-        let r  = TouchControlsModel.diameter(control) / 2
+        let r  = (resizeDiameter ?? TouchControlsModel.diameter(control)) / 2
         let gap: CGFloat = 14, edge: CGFloat = 8
 
         for size in [CGSize(width: 340, height: 236),
